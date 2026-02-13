@@ -18,6 +18,8 @@ export interface ExportOptions {
   segments: Segment[];
   outputPath: string;
   merge: boolean;
+  compress: boolean;
+  quality: number;
 }
 
 export interface ExportProgress {

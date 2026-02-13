@@ -12,6 +12,8 @@ interface ExportPanelProps {
 
 export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
+  const [compress, setCompress] = useState(false);
+  const [quality, setQuality] = useState(23);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +50,8 @@ export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
         })),
         outputPath,
         merge,
+        compress,
+        quality,
       });
 
       setExporting(false);
@@ -55,7 +59,7 @@ export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, merge]);
+  }, [inputPath, segments, merge, compress, quality]);
 
   const isDisabled = segments.length === 0 || exporting;
 
@@ -80,9 +84,41 @@ export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
         </label>
       </div>
 
+      <div className="flex items-center gap-4">
+        <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={compress}
+            onChange={(e) => setCompress(e.target.checked)}
+            className="accent-emerald-500"
+          />
+          Compress (smaller file)
+        </label>
+      </div>
+
+      {compress && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-zinc-500 shrink-0">Higher quality</span>
+            <input
+              type="range"
+              min={18}
+              max={28}
+              value={quality}
+              onChange={(e) => setQuality(Number(e.target.value))}
+              className="flex-1 accent-emerald-500"
+            />
+            <span className="text-xs text-zinc-500 shrink-0">Smaller file</span>
+          </div>
+          <p className="text-xs text-zinc-600 text-center">CRF {quality}</p>
+        </div>
+      )}
+
       {/* Keyframe notice */}
       <p className="text-xs text-zinc-600">
-        Lossless export — cuts occur at nearest keyframe (±1-2s accuracy).
+        {compress
+          ? "Re-encoded export — frame-accurate cuts."
+          : "Lossless export — cuts occur at nearest keyframe (±1-2s accuracy)."}
       </p>
 
       {/* Progress bar */}

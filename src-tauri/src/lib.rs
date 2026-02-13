@@ -14,8 +14,10 @@ fn export_video(
     segments: Vec<Segment>,
     output_path: String,
     merge: bool,
+    compress: bool,
+    quality: u32,
 ) -> Result<String, String> {
-    ffmpeg::export_segments(&app, &input_path, &segments, &output_path, merge)
+    ffmpeg::export_segments(&app, &input_path, &segments, &output_path, merge, compress, quality)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

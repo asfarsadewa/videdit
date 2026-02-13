@@ -152,6 +152,8 @@ pub fn export_segments(
     segments: &[Segment],
     output_path: &str,
     merge: bool,
+    compress: bool,
+    quality: u32,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
@@ -176,24 +178,51 @@ pub fn export_segments(
         };
 
         let mut cmd = Command::new(&ffmpeg);
-        cmd.args([
-            "-y",
-            "-ss",
-            &format!("{:.3}", seg.start),
-            "-to",
-            &format!("{:.3}", seg.end),
-            "-i",
-            input_path,
-            "-c",
-            "copy",
-            "-avoid_negative_ts",
-            "make_zero",
-            "-map",
-            "0",
-        ])
-        .arg(out_file.to_str().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        if compress {
+            // Re-encode: input-level seek then precise -to for frame-accurate cuts
+            cmd.args([
+                "-y",
+                "-ss",
+                &format!("{:.3}", seg.start),
+                "-to",
+                &format!("{:.3}", seg.end),
+                "-i",
+                input_path,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                &quality.to_string(),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-map",
+                "0",
+            ]);
+        } else {
+            cmd.args([
+                "-y",
+                "-ss",
+                &format!("{:.3}", seg.start),
+                "-to",
+                &format!("{:.3}", seg.end),
+                "-i",
+                input_path,
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-map",
+                "0",
+            ]);
+        }
+        cmd.arg(out_file.to_str().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         hide_console_window(&mut cmd);
 
         let mut child = cmd
