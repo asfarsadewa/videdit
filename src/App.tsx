@@ -1,11 +1,13 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import VideoPlayer from "./components/VideoPlayer";
 import Timeline from "./components/Timeline";
 import SegmentList from "./components/SegmentList";
 import ExportPanel from "./components/ExportPanel";
+import RecordingIndicator from "./components/RecordingIndicator";
 import type { VideoInfo, Segment } from "./types";
 import { generateId, clamp } from "./utils/format";
 
@@ -18,6 +20,27 @@ export default function App() {
   const [markInTime, setMarkInTime] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingStartTime, setRecordingStartTime] = useState<number>(0);
+
+  const loadVideo = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    setSegments([]);
+    setCurrentTime(0);
+    setMarkInTime(null);
+
+    try {
+      const info: VideoInfo = await invoke("get_video_info", { path });
+      setVideoInfo(info);
+      setVideoSrc(convertFileSrc(info.path));
+      setDuration(info.duration);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const openFile = useCallback(async () => {
     try {
@@ -31,53 +54,40 @@ export default function App() {
         ],
       });
       if (!selected) return;
-
-      setLoading(true);
-      setError(null);
-      setSegments([]);
-      setCurrentTime(0);
-      setMarkInTime(null);
-
-      const path = typeof selected === "string" ? selected : selected;
-      const info: VideoInfo = await invoke("get_video_info", { path });
-      setVideoInfo(info);
-      setVideoSrc(convertFileSrc(info.path));
-      setDuration(info.duration);
-      setLoading(false);
+      await loadVideo(typeof selected === "string" ? selected : selected);
     } catch (e) {
       setError(String(e));
-      setLoading(false);
     }
-  }, []);
+  }, [loadVideo]);
+
+  // Listen for recording events from Rust backend
+  useEffect(() => {
+    const unlistenStarted = listen("recording-started", () => {
+      setIsRecording(true);
+      setRecordingStartTime(Date.now());
+    });
+    const unlistenStopped = listen<string>("recording-stopped", (event) => {
+      setIsRecording(false);
+      setRecordingStartTime(0);
+      // Auto-load the recorded video
+      loadVideo(event.payload);
+    });
+    return () => {
+      unlistenStarted.then((fn) => fn());
+      unlistenStopped.then((fn) => fn());
+    };
+  }, [loadVideo]);
 
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       e.preventDefault();
       const file = e.dataTransfer.files[0];
       if (!file) return;
-      // Tauri drag-and-drop gives us the path via webview
-      // We need to use the file's path property
       const path = (file as File & { path?: string }).path;
       if (!path) return;
-
-      try {
-        setLoading(true);
-        setError(null);
-        setSegments([]);
-        setCurrentTime(0);
-        setMarkInTime(null);
-
-        const info: VideoInfo = await invoke("get_video_info", { path });
-        setVideoInfo(info);
-        setVideoSrc(convertFileSrc(info.path));
-        setDuration(info.duration);
-        setLoading(false);
-      } catch (e) {
-        setError(String(e));
-        setLoading(false);
-      }
+      await loadVideo(path);
     },
-    [],
+    [loadVideo],
   );
 
   const addSegment = useCallback(
@@ -172,6 +182,7 @@ export default function App() {
         {error && <span className="text-xs text-red-400 truncate max-w-sm">{error}</span>}
 
         <div className="ml-auto flex items-center gap-2">
+          {isRecording && <RecordingIndicator startTime={recordingStartTime} />}
           {videoInfo && (
             <button
               onClick={handleAddSegmentAtPlayhead}
@@ -191,14 +202,52 @@ export default function App() {
       {/* Main content */}
       {!videoSrc ? (
         <div className="flex-1 flex items-center justify-center">
-          <div className="text-center space-y-3">
-            <div className="text-6xl text-zinc-700">▶</div>
-            <p className="text-zinc-500">
-              Drop a video file here or click <strong>Open Video</strong>
-            </p>
-            <p className="text-xs text-zinc-600">
-              Supports MP4, MKV, MOV, AVI, WebM, and more
-            </p>
+          <div className="flex flex-col items-center gap-10 max-w-lg px-6">
+            {/* Drop zone */}
+            <button
+              onClick={openFile}
+              className="group w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-lg
+                         py-12 px-8 transition-colors cursor-pointer bg-zinc-800/20 hover:bg-zinc-800/40"
+            >
+              <div className="flex flex-col items-center gap-3">
+                <svg className="w-8 h-8 text-zinc-600 group-hover:text-zinc-400 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                <p className="text-sm text-zinc-400 group-hover:text-zinc-300 transition-colors">
+                  Drop a video file or click to browse
+                </p>
+                <p className="text-xs text-zinc-600">
+                  MP4, MKV, MOV, AVI, WebM, TS, FLV, WMV
+                </p>
+              </div>
+            </button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-4 w-full">
+              <div className="flex-1 h-px bg-zinc-800" />
+              <span className="text-[11px] text-zinc-600 uppercase tracking-widest">or</span>
+              <div className="flex-1 h-px bg-zinc-800" />
+            </div>
+
+            {/* Screen recording hint */}
+            <div className="w-full space-y-3">
+              <p className="text-xs text-zinc-500 text-center">Record your screen directly</p>
+              <div className="flex justify-center gap-3">
+                <div className="flex items-center gap-2 px-3 py-2 rounded bg-zinc-800/60 border border-zinc-800">
+                  <kbd className="px-1.5 py-0.5 text-[11px] font-mono bg-zinc-700 text-zinc-300 rounded">F9</kbd>
+                  <span className="text-xs text-zinc-500">Start recording</span>
+                </div>
+                <div className="flex items-center gap-2 px-3 py-2 rounded bg-zinc-800/60 border border-zinc-800">
+                  <kbd className="px-1.5 py-0.5 text-[11px] font-mono bg-zinc-700 text-zinc-300 rounded">F10</kbd>
+                  <span className="text-xs text-zinc-500">Stop recording</span>
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-600 text-center">
+                Captures display + system audio — works while minimized
+              </p>
+            </div>
           </div>
         </div>
       ) : (

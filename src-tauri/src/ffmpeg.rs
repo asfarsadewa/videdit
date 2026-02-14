@@ -34,7 +34,7 @@ pub struct ExportProgress {
 /// In dev mode (tauri dev), sidecars are copied to target/debug/ by tauri-build.
 /// In production, they sit next to the main exe.
 /// `name` should match the externalBin config entry, e.g. "binaries/ffmpeg".
-fn resolve_sidecar(_app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+pub fn resolve_sidecar(_app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("Failed to get current exe path: {e}"))?;
     let exe_dir = exe_path
@@ -64,13 +64,13 @@ fn resolve_sidecar(_app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn hide_console_window(cmd: &mut Command) -> &mut Command {
+pub fn hide_console_window(cmd: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
     cmd.creation_flags(0x08000000) // CREATE_NO_WINDOW
 }
 
 #[cfg(not(windows))]
-fn hide_console_window(cmd: &mut Command) -> &mut Command {
+pub fn hide_console_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 

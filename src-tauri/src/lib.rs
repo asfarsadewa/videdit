@@ -1,6 +1,12 @@
 mod ffmpeg;
+mod recording;
+
+use std::sync::{Arc, Mutex};
 
 use ffmpeg::{Segment, VideoInfo};
+use recording::SharedRecordingState;
+use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[tauri::command]
 fn get_video_info(app: tauri::AppHandle, path: String) -> Result<VideoInfo, String> {
@@ -20,12 +26,30 @@ fn export_video(
     ffmpeg::export_segments(&app, &input_path, &segments, &output_path, merge, compress, quality)
 }
 
+#[tauri::command]
+fn start_screen_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedRecordingState>,
+) -> Result<(), String> {
+    recording::start_recording(&app, &state)
+}
+
+#[tauri::command]
+fn stop_screen_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedRecordingState>,
+) -> Result<String, String> {
+    recording::stop_recording(&app, &state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(Arc::new(Mutex::new(recording::RecordingState::default())) as SharedRecordingState)
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -34,9 +58,46 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Register global shortcuts
+            let f9: Shortcut = "F9".parse().unwrap();
+            let f10: Shortcut = "F10".parse().unwrap();
+
+            let handle = app.handle().clone();
+            app.global_shortcut().on_shortcuts([f9, f10], move |_app, shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                let state = handle.state::<SharedRecordingState>();
+                if shortcut == &f9 {
+                    if let Err(e) = recording::start_recording(&handle, &state) {
+                        log::error!("Failed to start recording: {e}");
+                    }
+                } else if shortcut == &f10 {
+                    if let Err(e) = recording::stop_recording(&handle, &state) {
+                        log::error!("Failed to stop recording: {e}");
+                    }
+                }
+            })?;
+
+            // Handle window close — stop recording gracefully
+            let handle = app.handle().clone();
+            let main_window = app.get_webview_window("main").unwrap();
+            main_window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    let state = handle.state::<SharedRecordingState>();
+                    let _ = recording::stop_recording(&handle, &state);
+                }
+            });
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_video_info, export_video])
+        .invoke_handler(tauri::generate_handler![
+            get_video_info,
+            export_video,
+            start_screen_recording,
+            stop_screen_recording,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
