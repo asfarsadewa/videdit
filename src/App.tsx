@@ -8,7 +8,7 @@ import Timeline from "./components/Timeline";
 import SegmentList from "./components/SegmentList";
 import ExportPanel from "./components/ExportPanel";
 import RecordingIndicator from "./components/RecordingIndicator";
-import type { VideoInfo, Segment } from "./types";
+import type { VideoInfo, Segment, RecordingStartedPayload } from "./types";
 import { generateId, clamp } from "./utils/format";
 
 export default function App() {
@@ -22,6 +22,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number>(0);
+  const [isFromRecording, setIsFromRecording] = useState(false);
+  const [hasRecordingAudio, setHasRecordingAudio] = useState(false);
 
   const loadVideo = useCallback(async (path: string) => {
     setLoading(true);
@@ -54,6 +56,7 @@ export default function App() {
         ],
       });
       if (!selected) return;
+      setIsFromRecording(false);
       await loadVideo(typeof selected === "string" ? selected : selected);
     } catch (e) {
       setError(String(e));
@@ -62,13 +65,15 @@ export default function App() {
 
   // Listen for recording events from Rust backend
   useEffect(() => {
-    const unlistenStarted = listen("recording-started", () => {
+    const unlistenStarted = listen<RecordingStartedPayload>("recording-started", (event) => {
       setIsRecording(true);
       setRecordingStartTime(Date.now());
+      setHasRecordingAudio(event.payload.hasAudio);
     });
     const unlistenStopped = listen<string>("recording-stopped", (event) => {
       setIsRecording(false);
       setRecordingStartTime(0);
+      setIsFromRecording(true);
       // Auto-load the recorded video
       loadVideo(event.payload);
     });
@@ -85,6 +90,7 @@ export default function App() {
       if (!file) return;
       const path = (file as File & { path?: string }).path;
       if (!path) return;
+      setIsFromRecording(false);
       await loadVideo(path);
     },
     [loadVideo],
@@ -182,7 +188,7 @@ export default function App() {
         {error && <span className="text-xs text-red-400 truncate max-w-sm">{error}</span>}
 
         <div className="ml-auto flex items-center gap-2">
-          {isRecording && <RecordingIndicator startTime={recordingStartTime} />}
+          {isRecording && <RecordingIndicator startTime={recordingStartTime} hasAudio={hasRecordingAudio} />}
           {videoInfo && (
             <button
               onClick={handleAddSegmentAtPlayhead}
@@ -245,7 +251,7 @@ export default function App() {
                 </div>
               </div>
               <p className="text-[11px] text-zinc-600 text-center">
-                Captures display + system audio — works while minimized
+                Captures display + system audio (requires Stereo Mix) — works while minimized
               </p>
             </div>
           </div>
@@ -280,7 +286,7 @@ export default function App() {
                 onSeek={setCurrentTime}
               />
             </div>
-            <ExportPanel inputPath={videoInfo!.path} segments={segments} />
+            <ExportPanel inputPath={videoInfo!.path} segments={segments} isFromRecording={isFromRecording} />
           </div>
         </div>
       )}

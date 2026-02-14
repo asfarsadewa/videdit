@@ -2,9 +2,10 @@ import { useState, useEffect } from "react";
 
 interface RecordingIndicatorProps {
   startTime: number;
+  hasAudio: boolean;
 }
 
-export default function RecordingIndicator({ startTime }: RecordingIndicatorProps) {
+export default function RecordingIndicator({ startTime, hasAudio }: RecordingIndicatorProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -25,6 +26,11 @@ export default function RecordingIndicator({ startTime }: RecordingIndicatorProp
         <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
       </span>
       <span className="text-sm text-red-300 font-medium">Recording {timeStr}</span>
+      {hasAudio ? (
+        <span className="text-xs text-emerald-400">Audio</span>
+      ) : (
+        <span className="text-xs text-amber-400">No audio — enable Stereo Mix</span>
+      )}
       <span className="text-xs text-red-400/70">(F10 to stop)</span>
     </div>
   );

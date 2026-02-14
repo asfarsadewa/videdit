@@ -179,15 +179,16 @@ pub fn export_segments(
 
         let mut cmd = Command::new(&ffmpeg);
         if compress {
-            // Re-encode: input-level seek then precise -to for frame-accurate cuts
+            let seg_duration = seg.end - seg.start;
+            // Re-encode: input-level seek with -t duration for unambiguous length
             cmd.args([
                 "-y",
                 "-ss",
                 &format!("{:.3}", seg.start),
-                "-to",
-                &format!("{:.3}", seg.end),
                 "-i",
                 input_path,
+                "-t",
+                &format!("{:.3}", seg_duration),
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -204,14 +205,15 @@ pub fn export_segments(
                 "0",
             ]);
         } else {
+            // Output-level seeking: -ss/-to after -i preserves all streams (including audio)
             cmd.args([
                 "-y",
+                "-i",
+                input_path,
                 "-ss",
                 &format!("{:.3}", seg.start),
                 "-to",
                 &format!("{:.3}", seg.end),
-                "-i",
-                input_path,
                 "-c",
                 "copy",
                 "-avoid_negative_ts",
@@ -234,7 +236,10 @@ pub fn export_segments(
             let duration = seg.end - seg.start;
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(time) = parse_ffmpeg_time(&line) {
-                    let seg_percent = (time / duration).min(1.0) * 100.0;
+                    // With copy path (output-level seeking), time= is absolute;
+                    // with compress path (input-level seeking), time= is relative.
+                    let elapsed = if compress { time } else { (time - seg.start).max(0.0) };
+                    let seg_percent = (elapsed / duration).min(1.0) * 100.0;
                     let overall = ((i as f64 + seg_percent / 100.0) / total as f64) * 100.0;
                     let progress = ExportProgress {
                         segment_index: i,

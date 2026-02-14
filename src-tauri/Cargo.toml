@@ -1,6 +1,6 @@
 [package]
 name = "videdit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lossless Video Trimmer"
 authors = ["you"]
 license = ""
@@ -27,3 +27,5 @@ tauri-plugin-shell = "2"
 tauri-plugin-global-shortcut = "2"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
+wasapi = "0.22"
+hound = "3.5"

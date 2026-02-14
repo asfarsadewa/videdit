@@ -1,3 +1,4 @@
+mod audio_capture;
 mod ffmpeg;
 mod recording;
 
@@ -40,6 +41,11 @@ fn stop_screen_recording(
     state: tauri::State<'_, SharedRecordingState>,
 ) -> Result<String, String> {
     recording::stop_recording(&app, &state)
+}
+
+#[tauri::command]
+fn cleanup_recording_temp(state: tauri::State<'_, SharedRecordingState>) {
+    recording::cleanup_temp_file(&state)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -87,6 +93,7 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     let state = handle.state::<SharedRecordingState>();
                     let _ = recording::stop_recording(&handle, &state);
+                    recording::cleanup_temp_file(&state);
                 }
             });
 
@@ -97,6 +104,7 @@ pub fn run() {
             export_video,
             start_screen_recording,
             stop_screen_recording,
+            cleanup_recording_temp,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

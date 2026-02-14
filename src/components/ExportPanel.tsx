@@ -8,9 +8,10 @@ import { formatDuration } from "../utils/format";
 interface ExportPanelProps {
   inputPath: string;
   segments: Segment[];
+  isFromRecording?: boolean;
 }
 
-export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
+export default function ExportPanel({ inputPath, segments, isFromRecording }: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
@@ -54,12 +55,17 @@ export default function ExportPanel({ inputPath, segments }: ExportPanelProps) {
         quality,
       });
 
+      // Clean up temp recording file after successful export
+      if (isFromRecording) {
+        await invoke("cleanup_recording_temp").catch(() => {});
+      }
+
       setExporting(false);
     } catch (e) {
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, merge, compress, quality]);
+  }, [inputPath, segments, merge, compress, quality, isFromRecording]);
 
   const isDisabled = segments.length === 0 || exporting;
 

@@ -22,6 +22,11 @@ export interface ExportOptions {
   quality: number;
 }
 
+export interface RecordingStartedPayload {
+  hasAudio: boolean;
+  audioDevice: string | null;
+}
+
 export interface ExportProgress {
   segmentIndex: number;
   totalSegments: number;
