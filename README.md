@@ -1,10 +1,11 @@
 # videdit
 
-Bare-minimum video trimmer and compressor for Windows.
+Bare-minimum video trimmer, compressor, and screen recorder for Windows.
 
 - Lossless trim (cuts at nearest keyframe, no re-encode)
 - Re-encode with compression (configurable CRF/preset)
 - Multi-segment support with merge
+- Screen recording with global hotkeys (F9 start, F10 stop) — captures display + system audio
 - Keyboard-driven: Space, arrow keys, I/O for mark in/out
 
 Built with Tauri v2, React, and FFmpeg.
