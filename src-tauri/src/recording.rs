@@ -72,6 +72,7 @@ pub fn start_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-crf", "23",
+        "-g", "30",  // Keyframe every 1 second (30fps). Limits lossless trim snap to ≤1s.
     ]);
     cmd.arg(video_temp_path.to_str().unwrap());
     cmd.stdin(Stdio::piped())

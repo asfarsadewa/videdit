@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "videdit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.videdit.app",
   "build": {
     "frontendDist": "../dist",
