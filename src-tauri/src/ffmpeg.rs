@@ -177,6 +177,7 @@ pub fn export_segments(
 
     // If only exporting SRT (no segments), we're done
     if segments.is_empty() && !subtitles.is_empty() && !burn_subtitles {
+        let output_srt = PathBuf::from(output_path).with_extension("srt");
         let progress = ExportProgress {
             segment_index: 0,
             total_segments: 1,
@@ -185,7 +186,7 @@ pub fn export_segments(
             message: "SRT file exported".to_string(),
         };
         let _ = app.emit("export-progress", &progress);
-        return Ok(output_path.to_string());
+        return Ok(output_srt.to_string_lossy().into_owned());
     }
 
     for (i, seg) in segments.iter().enumerate() {
