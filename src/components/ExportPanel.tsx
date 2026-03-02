@@ -2,19 +2,21 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import type { Segment, ExportProgress } from "../types";
+import type { Segment, ExportProgress, Subtitle } from "../types";
 import { formatDuration } from "../utils/format";
 
 interface ExportPanelProps {
   inputPath: string;
   segments: Segment[];
+  subtitles: Subtitle[];
   isFromRecording?: boolean;
 }
 
-export default function ExportPanel({ inputPath, segments, isFromRecording }: ExportPanelProps) {
+export default function ExportPanel({ inputPath, segments, subtitles, isFromRecording }: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
+  const [subtitleOption, setSubtitleOption] = useState<'none' | 'srt' | 'burn'>('none');
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -27,6 +29,12 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    if (subtitles.length === 0) {
+      setSubtitleOption('none');
+    }
+  }, [subtitles.length]);
 
   const totalDuration = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
 
@@ -49,10 +57,16 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
           start: s.start,
           end: s.end,
         })),
+        subtitles: subtitleOption !== 'none' ? subtitles.map((s) => ({
+          start: s.start,
+          end: s.end,
+          text: s.text,
+        })) : [],
         outputPath,
         merge,
         compress,
         quality,
+        burnSubtitles: subtitleOption === 'burn',
       });
 
       // Clean up temp recording file after successful export
@@ -65,9 +79,11 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, merge, compress, quality, isFromRecording]);
+  }, [inputPath, segments, subtitles, merge, compress, quality, subtitleOption, isFromRecording]);
 
-  const isDisabled = segments.length === 0 || exporting;
+  const isDisabled =
+    (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
+    || exporting;
 
   return (
     <div className="p-4 border-t border-zinc-800 space-y-3">
@@ -101,6 +117,44 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
           Compress (smaller file)
         </label>
       </div>
+
+      {subtitles.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-sm text-zinc-400">Subtitles:</span>
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'none'}
+                onChange={() => setSubtitleOption('none')}
+                className="accent-zinc-500"
+              />
+              Don't export
+            </label>
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'srt'}
+                onChange={() => setSubtitleOption('srt')}
+                className="accent-cyan-500"
+              />
+              Export as .srt file
+            </label>
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'burn'}
+                onChange={() => setSubtitleOption('burn')}
+                className="accent-cyan-500"
+              />
+              Burn into video (re-encodes)
+            </label>
+          </div>
+        </div>
+      )}
 
       {compress && (
         <div className="space-y-1">

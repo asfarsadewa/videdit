@@ -92,6 +92,9 @@ pub fn start_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 log::info!("FFmpeg recording: {}", line);
+                if line.contains("error") || line.contains("Error") || line.contains("Failed") {
+                    log::error!("FFmpeg error: {}", line);
+                }
             }
         });
     }
@@ -179,31 +182,58 @@ pub fn stop_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<S
         final_output_path.with_file_name(fname)
     };
 
+    log::info!("Video temp path: {:?}", video_temp_path);
+    log::info!("Final output path: {:?}", final_output_path);
+
+    // Check if video temp file exists and has content
+    let video_valid = video_temp_path.exists()
+        && std::fs::metadata(&video_temp_path)
+            .map(|m| m.len() > 1024)
+            .unwrap_or(false);
+
+    if !video_valid {
+        log::warn!("Video temp file is missing or too small, recording may have failed");
+    }
+
     // Mux video + audio if audio was captured
     let result_path = if has_audio {
         if let Some(audio_path) = &audio_path {
-            match mux_video_audio(app, &video_temp_path, audio_path, &final_output_path) {
-                Ok(()) => {
-                    // Clean up temp files
-                    let _ = std::fs::remove_file(&video_temp_path);
-                    let _ = std::fs::remove_file(audio_path);
-                    final_output_path.clone()
+            if video_valid {
+                match mux_video_audio(app, &video_temp_path, audio_path, &final_output_path) {
+                    Ok(()) => {
+                        // Clean up temp files
+                        let _ = std::fs::remove_file(&video_temp_path);
+                        let _ = std::fs::remove_file(audio_path);
+                        final_output_path.clone()
+                    }
+                    Err(e) => {
+                        log::error!("Mux failed: {e}, falling back to video-only");
+                        // Fall back to video-only
+                        let _ = std::fs::rename(&video_temp_path, &final_output_path);
+                        let _ = std::fs::remove_file(audio_path);
+                        final_output_path.clone()
+                    }
                 }
-                Err(e) => {
-                    log::error!("Mux failed: {e}, falling back to video-only");
-                    // Fall back to video-only
-                    let _ = std::fs::rename(&video_temp_path, &final_output_path);
-                    let _ = std::fs::remove_file(audio_path);
-                    final_output_path.clone()
-                }
+            } else {
+                log::warn!("No valid video, using audio-only recording");
+                let audio_only_path = final_output_path.with_extension("wav");
+                std::fs::rename(audio_path, &audio_only_path)
+                    .map_err(|e| format!("Failed to save audio-only recording: {e}"))?;
+                audio_only_path
             }
         } else {
-            let _ = std::fs::rename(&video_temp_path, &final_output_path);
+            if video_valid {
+                std::fs::rename(&video_temp_path, &final_output_path)
+                    .map_err(|e| format!("Failed to save recording: {e}"))?;
+            }
             final_output_path.clone()
         }
     } else {
         // No audio — just rename video to final path
-        let _ = std::fs::rename(&video_temp_path, &final_output_path);
+        if video_valid {
+            std::fs::rename(&video_temp_path, &final_output_path)
+                .map_err(|e| format!("Failed to save recording: {e}"))?;
+        }
         if let Some(ap) = &audio_path {
             let _ = std::fs::remove_file(ap);
         }
@@ -212,6 +242,13 @@ pub fn stop_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<S
 
     state.is_recording = false;
     state.last_temp_path = Some(result_path.clone());
+
+    if std::fs::metadata(&result_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err(format!(
+            "Recording output is missing or empty: {}",
+            result_path.display()
+        ));
+    }
 
     let path_str = result_path.to_string_lossy().to_string();
     let _ = app.emit("recording-stopped", &path_str);

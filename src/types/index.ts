@@ -34,3 +34,10 @@ export interface ExportProgress {
   phase: "cutting" | "merging" | "done" | "error";
   message: string;
 }
+
+export interface Subtitle {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+}
