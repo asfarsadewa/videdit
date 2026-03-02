@@ -26,6 +26,21 @@ fn export_video(
     quality: u32,
     burn_subtitles: bool,
 ) -> Result<String, String> {
+    for (i, sub) in subtitles.iter().enumerate() {
+        if sub.start < 0.0 {
+            return Err(format!("Subtitle {i}: start ({}) must be non-negative", sub.start));
+        }
+        if sub.end <= sub.start {
+            return Err(format!(
+                "Subtitle {i}: end ({}) must be greater than start ({})",
+                sub.end, sub.start
+            ));
+        }
+        if sub.text.trim().is_empty() {
+            return Err(format!("Subtitle {i}: text must not be empty"));
+        }
+    }
+
     ffmpeg::export_segments(
         &app,
         &input_path,

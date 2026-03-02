@@ -439,11 +439,27 @@ pub fn export_segments(
 }
 
 /// Escape a file path for use inside an FFmpeg filter graph string.
-/// FFmpeg's filter graph parser uses `:` as its option delimiter, so Windows
-/// drive letters (e.g. `C:`) must have their colon escaped as `\:`.
+///
+/// Order of operations:
+///   1. Normalize backslash separators to forward slashes.
+///   2. Escape filter-graph special characters (`\`, `'`, `[`, `]`, `;`)
+///      by prefixing each with a backslash.
+///   3. Escape a Windows drive-letter colon (`C:` → `C\:`) — done last so
+///      the backslash added here is not re-escaped by step 2.
 fn escape_path_for_filter(path: &std::path::Path) -> String {
+    // Step 1: normalize path separators (removes all native backslashes)
     let s = path.to_string_lossy().replace('\\', "/");
-    // If second char is ':', it's a Windows drive letter — escape the colon.
+
+    // Step 2: escape filter-graph metacharacters
+    // Backslash is escaped first; after step 1 there are none, but included for correctness.
+    let s = s
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace(';', "\\;");
+
+    // Step 3: escape Windows drive-letter colon (e.g. "C:/" → "C\:/")
     if s.len() >= 2 && s.as_bytes()[1] == b':' {
         format!("{}\\:{}", &s[..1], &s[2..])
     } else {
@@ -549,8 +565,14 @@ fn create_srt_for_export(
         log::info!("Saved SRT to: {:?}", srt_path);
     } else {
         // One SRT per segment file with timestamps offset to segment start = 0
-        let stem = out.file_stem().unwrap().to_str().unwrap();
-        let parent = out.parent().unwrap();
+        let stem = out
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("Cannot derive file stem from output path: {output_path}"))?;
+        let parent = out
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         for (i, seg) in segments.iter().enumerate() {
             let srt_path = parent.join(format!("{}_{:03}.srt", stem, i + 1));
             let filtered: Vec<Subtitle> = subtitles

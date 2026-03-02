@@ -30,6 +30,12 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
     };
   }, []);
 
+  useEffect(() => {
+    if (subtitles.length === 0) {
+      setSubtitleOption('none');
+    }
+  }, [subtitles.length]);
+
   const totalDuration = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
 
   const handleExport = useCallback(async () => {

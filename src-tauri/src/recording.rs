@@ -216,25 +216,36 @@ pub fn stop_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<S
                 }
             } else {
                 log::warn!("No valid video, using audio-only recording");
-                let _ = std::fs::rename(audio_path, &final_output_path);
-                final_output_path.clone()
+                let audio_only_path = final_output_path.with_extension("wav");
+                std::fs::rename(audio_path, &audio_only_path)
+                    .map_err(|e| format!("Failed to save audio-only recording: {e}"))?;
+                audio_only_path
             }
         } else {
             if video_valid {
-                let _ = std::fs::rename(&video_temp_path, &final_output_path);
+                std::fs::rename(&video_temp_path, &final_output_path)
+                    .map_err(|e| format!("Failed to save recording: {e}"))?;
             }
             final_output_path.clone()
         }
     } else {
         // No audio — just rename video to final path
         if video_valid {
-            let _ = std::fs::rename(&video_temp_path, &final_output_path);
+            std::fs::rename(&video_temp_path, &final_output_path)
+                .map_err(|e| format!("Failed to save recording: {e}"))?;
         }
         if let Some(ap) = &audio_path {
             let _ = std::fs::remove_file(ap);
         }
         final_output_path.clone()
     };
+
+    if std::fs::metadata(&result_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err(format!(
+            "Recording output is missing or empty: {}",
+            result_path.display()
+        ));
+    }
 
     state.is_recording = false;
     state.last_temp_path = Some(result_path.clone());

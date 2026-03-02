@@ -151,7 +151,7 @@ export default function Timeline({
               key={sub.id}
               className="absolute bottom-0 h-2 bg-cyan-600/60 border border-cyan-400/60 rounded-sm hover:bg-cyan-500/80 cursor-pointer"
               style={{ left: `${left}%`, width: `${width}%` }}
-              onClick={(e) => {
+              onMouseDown={(e) => {
                 e.stopPropagation();
                 onSeek(sub.start);
               }}

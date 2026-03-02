@@ -187,12 +187,14 @@ export default function App() {
   }, [subtitleMarkIn, currentTime, duration]);
 
   const handleAddSubtitleAtPlayhead = useCallback(() => {
-    const start = currentTime;
-    const end = Math.min(currentTime + 3, duration);
+    if (currentTime >= duration) return;
+    const start = clamp(currentTime, 0, duration);
+    const end = Math.min(start + 3, duration);
+    if (end <= start) return;
     const newSub: Subtitle = {
       id: generateId(),
-      start: clamp(start, 0, duration),
-      end: clamp(end, 0, duration),
+      start,
+      end,
       text: "",
     };
     setPendingSubtitle(newSub);
