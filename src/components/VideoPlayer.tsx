@@ -78,7 +78,6 @@ export default function VideoPlayer({
       // Shift+I for subtitle mark in
       if (e.key === "I" && e.shiftKey) {
         e.preventDefault();
-        console.log('Shift+I pressed - marking subtitle start at', currentTimeRef.current);
         onSubtitleMarkIn();
         return;
       }
@@ -86,7 +85,6 @@ export default function VideoPlayer({
       // Shift+O for subtitle mark out
       if (e.key === "O" && e.shiftKey) {
         e.preventDefault();
-        console.log('Shift+O pressed - marking subtitle end at', currentTimeRef.current);
         // Pause the video so user can type the subtitle
         if (!video.paused) {
           video.pause();

@@ -75,7 +75,9 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
     }
   }, [inputPath, segments, subtitles, merge, compress, quality, subtitleOption, isFromRecording]);
 
-  const isDisabled = segments.length === 0 || exporting;
+  const isDisabled =
+    (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
+    || exporting;
 
   return (
     <div className="p-4 border-t border-zinc-800 space-y-3">

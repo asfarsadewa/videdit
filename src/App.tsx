@@ -201,7 +201,14 @@ export default function App() {
   const handleSaveSubtitle = useCallback((text: string) => {
     if (!pendingSubtitle) return;
     const updated: Subtitle = { ...pendingSubtitle, text };
-    setSubtitles((prev) => [...prev, updated].sort((a, b) => a.start - b.start));
+    setSubtitles((prev) => {
+      const exists = prev.some((s) => s.id === updated.id);
+      if (exists) {
+        return prev.map((s) => s.id === updated.id ? updated : s)
+                   .sort((a, b) => a.start - b.start);
+      }
+      return [...prev, updated].sort((a, b) => a.start - b.start);
+    });
     setPendingSubtitle(null);
   }, [pendingSubtitle]);
 
@@ -216,7 +223,6 @@ export default function App() {
 
   const handleEditSubtitle = useCallback((subtitle: Subtitle) => {
     setPendingSubtitle(subtitle);
-    setSubtitles((prev) => prev.filter((s) => s.id !== subtitle.id));
   }, []);
 
   return (

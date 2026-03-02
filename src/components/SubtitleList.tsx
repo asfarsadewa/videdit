@@ -28,7 +28,7 @@ export default function SubtitleList({
       {subtitles.map((sub, i) => (
         <div
           key={sub.id}
-          className="flex items-center gap-2 px-2 py-2 bg-zinc-800 rounded text-sm hover:bg-zinc-750 group"
+          className="flex items-center gap-2 px-2 py-2 bg-zinc-800 rounded text-sm hover:bg-zinc-700 group"
         >
           <span className="text-cyan-400 font-mono text-xs w-5">{i + 1}</span>
           <button

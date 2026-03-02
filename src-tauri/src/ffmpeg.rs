@@ -170,24 +170,10 @@ pub fn export_segments(
 
     let mut temp_files: Vec<PathBuf> = Vec::new();
 
-    // Export SRT file if subtitles exist and not burning
-    let srt_path_for_burn = if burn_subtitles && !subtitles.is_empty() {
-        let path = create_srt_file(subtitles, &temp_dir)?;
-        log::info!("Created SRT file for burning at: {:?}", path);
-        Some(path)
-    } else if !subtitles.is_empty() && !burn_subtitles {
-        let path = create_srt_file(subtitles, &temp_dir)?;
-        log::info!("Created SRT file at: {:?}", path);
-        
-        // Copy SRT to output directory
-        let output_srt = PathBuf::from(output_path).with_extension("srt");
-        std::fs::copy(&path, &output_srt)
-            .map_err(|e| format!("Failed to copy SRT file: {e}"))?;
-        log::info!("Saved SRT to: {:?}", output_srt);
-        None
-    } else {
-        None
-    };
+    // Export SRT alongside video if not burning (handles subtitle-only export too)
+    if !subtitles.is_empty() && !burn_subtitles {
+        create_srt_for_export(subtitles, segments, output_path, merge)?;
+    }
 
     // If only exporting SRT (no segments), we're done
     if segments.is_empty() && !subtitles.is_empty() && !burn_subtitles {
@@ -218,6 +204,13 @@ pub fn export_segments(
             PathBuf::from(output_path)
         };
 
+        // Create per-segment SRT with timestamps offset to segment start = 0
+        let seg_srt = if burn_subtitles && !subtitles.is_empty() {
+            create_srt_for_segment(subtitles, seg.start, seg.end, &temp_dir, &format!("sub_{i}.srt"))?
+        } else {
+            None
+        };
+
         let mut cmd = Command::new(&ffmpeg);
         if compress {
             let seg_duration = seg.end - seg.start;
@@ -246,7 +239,7 @@ pub fn export_segments(
             ]);
             
             // Add subtitle filter if burning
-            if let Some(ref srt) = srt_path_for_burn {
+            if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
                 log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
                 cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
@@ -254,7 +247,7 @@ pub fn export_segments(
         } else {
             let seg_duration = seg.end - seg.start;
             // Burning subtitles requires re-encoding
-            if let Some(ref srt) = srt_path_for_burn {
+            if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
                 log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
                 cmd.args([
@@ -474,24 +467,106 @@ fn parse_ffmpeg_time(line: &str) -> Option<f64> {
     }
 }
 
-/// Convert subtitles to SRT format and write to a temp file.
-/// Returns the path to the SRT file.
-fn create_srt_file(subtitles: &[Subtitle], temp_dir: &tempfile::TempDir) -> Result<PathBuf, String> {
-    let srt_path = temp_dir.path().join("subtitles.srt");
+/// Write subtitles to an SRT file at the given path.
+fn write_srt_to_path(subtitles: &[Subtitle], path: &Path) -> Result<(), String> {
     let mut content = String::new();
-
     for (i, sub) in subtitles.iter().enumerate() {
         let start = format_time_srt(sub.start);
         let end = format_time_srt(sub.end);
-        content.push_str(&format!("{}\n", i + 1));
-        content.push_str(&format!("{} --> {}\n", start, end));
-        content.push_str(&format!("{}\n\n", sub.text));
+        content.push_str(&format!("{}\n{} --> {}\n{}\n\n", i + 1, start, end, sub.text));
+    }
+    std::fs::write(path, &content).map_err(|e| format!("Failed to write SRT file: {e}"))
+}
+
+/// Create a temp SRT file for a single segment with timestamps offset so the segment starts at 0.
+/// Returns None if no subtitles overlap the segment (caller should skip the subtitle filter).
+fn create_srt_for_segment(
+    subtitles: &[Subtitle],
+    seg_start: f64,
+    seg_end: f64,
+    temp_dir: &tempfile::TempDir,
+    name: &str,
+) -> Result<Option<PathBuf>, String> {
+    let filtered: Vec<Subtitle> = subtitles
+        .iter()
+        .filter(|sub| sub.end > seg_start && sub.start < seg_end)
+        .map(|sub| Subtitle {
+            start: (sub.start - seg_start).max(0.0),
+            end: (sub.end - seg_start).max(0.0),
+            text: sub.text.clone(),
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return Ok(None);
     }
 
-    std::fs::write(&srt_path, &content)
-        .map_err(|e| format!("Failed to write SRT file: {e}"))?;
+    let srt_path = temp_dir.path().join(name);
+    write_srt_to_path(&filtered, &srt_path)?;
+    Ok(Some(srt_path))
+}
 
-    Ok(srt_path)
+/// Export SRT file(s) with correctly remapped timestamps alongside the video output.
+///
+/// - No segments: original timestamps → `output.srt`
+/// - Merge or single segment: merged timeline timestamps → `output.srt`
+/// - Multiple separate segments: per-segment offset timestamps → `output_001.srt`, etc.
+fn create_srt_for_export(
+    subtitles: &[Subtitle],
+    segments: &[Segment],
+    output_path: &str,
+    merge: bool,
+) -> Result<(), String> {
+    let out = Path::new(output_path);
+
+    if segments.is_empty() {
+        let srt_path = out.with_extension("srt");
+        write_srt_to_path(subtitles, &srt_path)?;
+        log::info!("Saved SRT to: {:?}", srt_path);
+        return Ok(());
+    }
+
+    if merge || segments.len() == 1 {
+        // Remap each subtitle to its position in the merged output timeline
+        let mut remapped: Vec<Subtitle> = Vec::new();
+        let mut cumulative_offset = 0.0_f64;
+        for seg in segments {
+            for sub in subtitles {
+                if sub.end > seg.start && sub.start < seg.end {
+                    remapped.push(Subtitle {
+                        start: (sub.start - seg.start + cumulative_offset).max(0.0),
+                        end: (sub.end - seg.start + cumulative_offset).max(0.0),
+                        text: sub.text.clone(),
+                    });
+                }
+            }
+            cumulative_offset += seg.end - seg.start;
+        }
+        remapped.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+        let srt_path = out.with_extension("srt");
+        write_srt_to_path(&remapped, &srt_path)?;
+        log::info!("Saved SRT to: {:?}", srt_path);
+    } else {
+        // One SRT per segment file with timestamps offset to segment start = 0
+        let stem = out.file_stem().unwrap().to_str().unwrap();
+        let parent = out.parent().unwrap();
+        for (i, seg) in segments.iter().enumerate() {
+            let srt_path = parent.join(format!("{}_{:03}.srt", stem, i + 1));
+            let filtered: Vec<Subtitle> = subtitles
+                .iter()
+                .filter(|sub| sub.end > seg.start && sub.start < seg.end)
+                .map(|sub| Subtitle {
+                    start: (sub.start - seg.start).max(0.0),
+                    end: (sub.end - seg.start).max(0.0),
+                    text: sub.text.clone(),
+                })
+                .collect();
+            write_srt_to_path(&filtered, &srt_path)?;
+            log::info!("Saved SRT to: {:?}", srt_path);
+        }
+    }
+
+    Ok(())
 }
 
 /// Format time in seconds to SRT format (HH:MM:SS,mmm).

@@ -19,8 +19,7 @@ export default function SubtitleEditor({
   useEffect(() => {
     if (subtitle) {
       setText(subtitle.text);
-      // Auto-focus the input when editor opens
-      setTimeout(() => inputRef.current?.focus(), 10);
+      inputRef.current?.focus();
     }
   }, [subtitle]);
 
@@ -57,7 +56,6 @@ export default function SubtitleEditor({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
-        onBlur={handleSave}
         placeholder="Type subtitle text... (Enter to save, Esc to cancel)"
         className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
       />
