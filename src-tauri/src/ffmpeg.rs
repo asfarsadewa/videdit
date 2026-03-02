@@ -170,20 +170,27 @@ pub fn export_segments(
 
     let mut temp_files: Vec<PathBuf> = Vec::new();
 
-    // Export SRT file if subtitles exist (regardless of burn option)
-    if !subtitles.is_empty() {
-        let srt_path = create_srt_file(subtitles, &temp_dir)?;
-        log::info!("Created SRT file at: {:?}", srt_path);
+    // Export SRT file if subtitles exist and not burning
+    let srt_path_for_burn = if burn_subtitles && !subtitles.is_empty() {
+        let path = create_srt_file(subtitles, &temp_dir)?;
+        log::info!("Created SRT file for burning at: {:?}", path);
+        Some(path)
+    } else if !subtitles.is_empty() && !burn_subtitles {
+        let path = create_srt_file(subtitles, &temp_dir)?;
+        log::info!("Created SRT file at: {:?}", path);
         
         // Copy SRT to output directory
         let output_srt = PathBuf::from(output_path).with_extension("srt");
-        std::fs::copy(&srt_path, &output_srt)
+        std::fs::copy(&path, &output_srt)
             .map_err(|e| format!("Failed to copy SRT file: {e}"))?;
         log::info!("Saved SRT to: {:?}", output_srt);
-    }
+        None
+    } else {
+        None
+    };
 
     // If only exporting SRT (no segments), we're done
-    if segments.is_empty() && !subtitles.is_empty() {
+    if segments.is_empty() && !subtitles.is_empty() && !burn_subtitles {
         let progress = ExportProgress {
             segment_index: 0,
             total_segments: 1,
@@ -237,23 +244,58 @@ pub fn export_segments(
                 "-map",
                 "0",
             ]);
+            
+            // Add subtitle filter if burning
+            if let Some(ref srt) = srt_path_for_burn {
+                let srt_escaped = escape_path_for_filter(srt);
+                log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
+                cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
+            }
         } else {
             let seg_duration = seg.end - seg.start;
-            cmd.args([
-                "-y",
-                "-ss",
-                &format!("{:.3}", seg.start),
-                "-i",
-                input_path,
-                "-t",
-                &format!("{:.3}", seg_duration),
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "make_zero",
-                "-map",
-                "0",
-            ]);
+            // Burning subtitles requires re-encoding
+            if let Some(ref srt) = srt_path_for_burn {
+                let srt_escaped = escape_path_for_filter(srt);
+                log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
+                cmd.args([
+                    "-y",
+                    "-ss",
+                    &format!("{:.3}", seg.start),
+                    "-i",
+                    input_path,
+                    "-t",
+                    &format!("{:.3}", seg_duration),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "18",
+                    "-c:a",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-vf",
+                    &format!("subtitles='{}'", srt_escaped),
+                ]);
+            } else {
+                // True lossless copy
+                cmd.args([
+                    "-y",
+                    "-ss",
+                    &format!("{:.3}", seg.start),
+                    "-i",
+                    input_path,
+                    "-t",
+                    &format!("{:.3}", seg_duration),
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-map",
+                    "0",
+                ]);
+            }
         }
         cmd.arg(out_file.to_str().unwrap())
             .stdout(Stdio::piped())
@@ -400,6 +442,19 @@ pub fn export_segments(
     let _ = app.emit("export-progress", &progress);
 
     Ok(output_path.to_string())
+}
+
+/// Escape a file path for use inside an FFmpeg filter graph string.
+/// FFmpeg's filter graph parser uses `:` as its option delimiter, so Windows
+/// drive letters (e.g. `C:`) must have their colon escaped as `\:`.
+fn escape_path_for_filter(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    // If second char is ':', it's a Windows drive letter — escape the colon.
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        format!("{}\\:{}", &s[..1], &s[2..])
+    } else {
+        s
+    }
 }
 
 fn parse_ffmpeg_time(line: &str) -> Option<f64> {

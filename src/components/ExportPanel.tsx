@@ -16,7 +16,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
-  const [exportSrt, setExportSrt] = useState(false);
+  const [subtitleOption, setSubtitleOption] = useState<'none' | 'srt' | 'burn'>('none');
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +51,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
           start: s.start,
           end: s.end,
         })),
-        subtitles: exportSrt ? subtitles.map((s) => ({
+        subtitles: subtitleOption !== 'none' ? subtitles.map((s) => ({
           start: s.start,
           end: s.end,
           text: s.text,
@@ -60,7 +60,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
         merge,
         compress,
         quality,
-        burnSubtitles: exportSrt,
+        burnSubtitles: subtitleOption === 'burn',
       });
 
       // Clean up temp recording file after successful export
@@ -73,7 +73,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, merge, compress, quality, exportSrt, isFromRecording]);
+  }, [inputPath, segments, subtitles, merge, compress, quality, subtitleOption, isFromRecording]);
 
   const isDisabled = segments.length === 0 || exporting;
 
@@ -108,18 +108,45 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
           />
           Compress (smaller file)
         </label>
-        {subtitles.length > 0 && (
-          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={exportSrt}
-              onChange={(e) => setExportSrt(e.target.checked)}
-              className="accent-cyan-500"
-            />
-            Export subtitles as .srt file
-          </label>
-        )}
       </div>
+
+      {subtitles.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-sm text-zinc-400">Subtitles:</span>
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'none'}
+                onChange={() => setSubtitleOption('none')}
+                className="accent-zinc-500"
+              />
+              Don't export
+            </label>
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'srt'}
+                onChange={() => setSubtitleOption('srt')}
+                className="accent-cyan-500"
+              />
+              Export as .srt file
+            </label>
+            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+              <input
+                type="radio"
+                name="subtitleOption"
+                checked={subtitleOption === 'burn'}
+                onChange={() => setSubtitleOption('burn')}
+                className="accent-cyan-500"
+              />
+              Burn into video (re-encodes)
+            </label>
+          </div>
+        </div>
+      )}
 
       {compress && (
         <div className="space-y-1">
