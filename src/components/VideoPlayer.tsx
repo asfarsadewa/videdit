@@ -7,6 +7,9 @@ interface VideoPlayerProps {
   onDurationChange: (duration: number) => void;
   onMarkIn: () => void;
   onMarkOut: () => void;
+  onAddSubtitle: () => void;
+  onSubtitleMarkIn: () => void;
+  onSubtitleMarkOut: () => void;
 }
 
 export default function VideoPlayer({
@@ -16,9 +19,18 @@ export default function VideoPlayer({
   onDurationChange,
   onMarkIn,
   onMarkOut,
+  onAddSubtitle,
+  onSubtitleMarkIn,
+  onSubtitleMarkOut,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const isSeeking = useRef(false);
+  const currentTimeRef = useRef(currentTime);
+
+  // Keep ref updated with current time
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
 
   // Sync video time when currentTime changes externally (e.g. timeline click)
   useEffect(() => {
@@ -63,6 +75,26 @@ export default function VideoPlayer({
       // Don't capture if user is in an input
       if ((e.target as HTMLElement).tagName === "INPUT") return;
 
+      // Shift+I for subtitle mark in
+      if (e.key === "I" && e.shiftKey) {
+        e.preventDefault();
+        console.log('Shift+I pressed - marking subtitle start at', currentTimeRef.current);
+        onSubtitleMarkIn();
+        return;
+      }
+
+      // Shift+O for subtitle mark out
+      if (e.key === "O" && e.shiftKey) {
+        e.preventDefault();
+        console.log('Shift+O pressed - marking subtitle end at', currentTimeRef.current);
+        // Pause the video so user can type the subtitle
+        if (!video.paused) {
+          video.pause();
+        }
+        onSubtitleMarkOut();
+        return;
+      }
+
       switch (e.key.toLowerCase()) {
         case " ":
           e.preventDefault();
@@ -85,12 +117,17 @@ export default function VideoPlayer({
           e.preventDefault();
           onMarkOut();
           break;
+        case "s":
+          e.preventDefault();
+          // Quick add subtitle at current time (3s duration)
+          onAddSubtitle();
+          break;
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [src, onMarkIn, onMarkOut]);
+  }, [src, onMarkIn, onMarkOut, onAddSubtitle, onSubtitleMarkIn, onSubtitleMarkOut]);
 
   if (!src) {
     return null;

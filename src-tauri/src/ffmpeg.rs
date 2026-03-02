@@ -22,6 +22,13 @@ pub struct Segment {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Subtitle {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportProgress {
     pub segment_index: usize,
     pub total_segments: usize,
@@ -150,16 +157,43 @@ pub fn export_segments(
     app: &AppHandle,
     input_path: &str,
     segments: &[Segment],
+    subtitles: &[Subtitle],
     output_path: &str,
     merge: bool,
     compress: bool,
     quality: u32,
+    burn_subtitles: bool,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
     let total = segments.len();
 
     let mut temp_files: Vec<PathBuf> = Vec::new();
+
+    // Export SRT file if subtitles exist (regardless of burn option)
+    if !subtitles.is_empty() {
+        let srt_path = create_srt_file(subtitles, &temp_dir)?;
+        log::info!("Created SRT file at: {:?}", srt_path);
+        
+        // Copy SRT to output directory
+        let output_srt = PathBuf::from(output_path).with_extension("srt");
+        std::fs::copy(&srt_path, &output_srt)
+            .map_err(|e| format!("Failed to copy SRT file: {e}"))?;
+        log::info!("Saved SRT to: {:?}", output_srt);
+    }
+
+    // If only exporting SRT (no segments), we're done
+    if segments.is_empty() && !subtitles.is_empty() {
+        let progress = ExportProgress {
+            segment_index: 0,
+            total_segments: 1,
+            percent: 100.0,
+            phase: "done".to_string(),
+            message: "SRT file exported".to_string(),
+        };
+        let _ = app.emit("export-progress", &progress);
+        return Ok(output_path.to_string());
+    }
 
     for (i, seg) in segments.iter().enumerate() {
         let progress = ExportProgress {
@@ -180,7 +214,6 @@ pub fn export_segments(
         let mut cmd = Command::new(&ffmpeg);
         if compress {
             let seg_duration = seg.end - seg.start;
-            // Re-encode: input-level seek with -t duration for unambiguous length
             cmd.args([
                 "-y",
                 "-ss",
@@ -206,8 +239,6 @@ pub fn export_segments(
             ]);
         } else {
             let seg_duration = seg.end - seg.start;
-            // Input-level seeking: -ss before -i seeks both video and audio to the same
-            // GOP boundary, eliminating A/V desync on lossless cuts.
             cmd.args([
                 "-y",
                 "-ss",
@@ -233,10 +264,14 @@ pub fn export_segments(
             .spawn()
             .map_err(|e| format!("Failed to start ffmpeg: {e}"))?;
 
+        // Capture stderr for error reporting
+        let mut stderr_output = String::new();
         if let Some(stderr) = child.stderr.take() {
             let reader = BufReader::new(stderr);
             let duration = seg.end - seg.start;
             for line in reader.lines().map_while(Result::ok) {
+                stderr_output.push_str(&line);
+                stderr_output.push('\n');
                 if let Some(time) = parse_ffmpeg_time(&line) {
                     // Both paths now use input-level seeking, so time= is relative (starts near 0).
                     let elapsed = time;
@@ -256,7 +291,19 @@ pub fn export_segments(
 
         let status = child.wait().map_err(|e| format!("FFmpeg process error: {e}"))?;
         if !status.success() {
-            return Err(format!("FFmpeg failed on segment {}", i + 1));
+            log::error!("FFmpeg stderr: {}", stderr_output);
+            // Extract error lines (lines containing "Error" or at the end)
+            let error_lines: Vec<&str> = stderr_output
+                .lines()
+                .filter(|l| l.contains("Error") || l.contains("error") || l.contains("Invalid"))
+                .take(3)
+                .collect();
+            let error_msg = if error_lines.is_empty() {
+                stderr_output.lines().take(10).collect::<Vec<_>>().join(" | ")
+            } else {
+                error_lines.join(" | ")
+            };
+            return Err(format!("FFmpeg failed on segment {}: {}", i + 1, error_msg));
         }
 
         temp_files.push(out_file);
@@ -370,4 +417,33 @@ fn parse_ffmpeg_time(line: &str) -> Option<f64> {
     } else {
         None
     }
+}
+
+/// Convert subtitles to SRT format and write to a temp file.
+/// Returns the path to the SRT file.
+fn create_srt_file(subtitles: &[Subtitle], temp_dir: &tempfile::TempDir) -> Result<PathBuf, String> {
+    let srt_path = temp_dir.path().join("subtitles.srt");
+    let mut content = String::new();
+
+    for (i, sub) in subtitles.iter().enumerate() {
+        let start = format_time_srt(sub.start);
+        let end = format_time_srt(sub.end);
+        content.push_str(&format!("{}\n", i + 1));
+        content.push_str(&format!("{} --> {}\n", start, end));
+        content.push_str(&format!("{}\n\n", sub.text));
+    }
+
+    std::fs::write(&srt_path, &content)
+        .map_err(|e| format!("Failed to write SRT file: {e}"))?;
+
+    Ok(srt_path)
+}
+
+/// Format time in seconds to SRT format (HH:MM:SS,mmm).
+fn format_time_srt(seconds: f64) -> String {
+    let hours = (seconds / 3600.0) as u32;
+    let minutes = ((seconds % 3600.0) / 60.0) as u32;
+    let secs = (seconds % 60.0) as u32;
+    let millis = ((seconds * 1000.0) % 1000.0) as u32;
+    format!("{:02}:{:02}:{:02},{:03}", hours, minutes, secs, millis)
 }

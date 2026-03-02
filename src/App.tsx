@@ -8,7 +8,9 @@ import Timeline from "./components/Timeline";
 import SegmentList from "./components/SegmentList";
 import ExportPanel from "./components/ExportPanel";
 import RecordingIndicator from "./components/RecordingIndicator";
-import type { VideoInfo, Segment, RecordingStartedPayload } from "./types";
+import SubtitleEditor from "./components/SubtitleEditor";
+import SubtitleList from "./components/SubtitleList";
+import type { VideoInfo, Segment, RecordingStartedPayload, Subtitle } from "./types";
 import { generateId, clamp } from "./utils/format";
 
 export default function App() {
@@ -24,13 +26,19 @@ export default function App() {
   const [recordingStartTime, setRecordingStartTime] = useState<number>(0);
   const [isFromRecording, setIsFromRecording] = useState(false);
   const [hasRecordingAudio, setHasRecordingAudio] = useState(false);
+  const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
+  const [pendingSubtitle, setPendingSubtitle] = useState<Subtitle | null>(null);
+  const [subtitleMarkIn, setSubtitleMarkIn] = useState<number | null>(null);
 
   const loadVideo = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     setSegments([]);
+    setSubtitles([]);
     setCurrentTime(0);
     setMarkInTime(null);
+    setSubtitleMarkIn(null);
+    setPendingSubtitle(null);
 
     try {
       const info: VideoInfo = await invoke("get_video_info", { path });
@@ -160,6 +168,57 @@ export default function App() {
     setSegments((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
+  // Subtitle handlers
+  const handleSubtitleMarkIn = useCallback(() => {
+    setSubtitleMarkIn(currentTime);
+  }, [currentTime]);
+
+  const handleSubtitleMarkOut = useCallback(() => {
+    if (subtitleMarkIn !== null && currentTime > subtitleMarkIn) {
+      const newSub: Subtitle = {
+        id: generateId(),
+        start: clamp(subtitleMarkIn, 0, duration),
+        end: clamp(currentTime, 0, duration),
+        text: "",
+      };
+      setPendingSubtitle(newSub);
+      setSubtitleMarkIn(null);
+    }
+  }, [subtitleMarkIn, currentTime, duration]);
+
+  const handleAddSubtitleAtPlayhead = useCallback(() => {
+    const start = currentTime;
+    const end = Math.min(currentTime + 3, duration);
+    const newSub: Subtitle = {
+      id: generateId(),
+      start: clamp(start, 0, duration),
+      end: clamp(end, 0, duration),
+      text: "",
+    };
+    setPendingSubtitle(newSub);
+  }, [currentTime, duration]);
+
+  const handleSaveSubtitle = useCallback((text: string) => {
+    if (!pendingSubtitle) return;
+    const updated: Subtitle = { ...pendingSubtitle, text };
+    setSubtitles((prev) => [...prev, updated].sort((a, b) => a.start - b.start));
+    setPendingSubtitle(null);
+  }, [pendingSubtitle]);
+
+  const handleCancelSubtitle = useCallback(() => {
+    setPendingSubtitle(null);
+    setSubtitleMarkIn(null);
+  }, []);
+
+  const handleDeleteSubtitle = useCallback((id: string) => {
+    setSubtitles((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
+  const handleEditSubtitle = useCallback((subtitle: Subtitle) => {
+    setPendingSubtitle(subtitle);
+    setSubtitles((prev) => prev.filter((s) => s.id !== subtitle.id));
+  }, []);
+
   return (
     <div
       className="flex flex-col h-screen bg-zinc-900 text-zinc-100 overflow-hidden"
@@ -190,16 +249,31 @@ export default function App() {
         <div className="ml-auto flex items-center gap-2">
           {isRecording && <RecordingIndicator startTime={recordingStartTime} hasAudio={hasRecordingAudio} />}
           {videoInfo && (
-            <button
-              onClick={handleAddSegmentAtPlayhead}
-              className="px-3 py-1.5 text-sm bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
-            >
-              + Add Segment
-            </button>
+            <>
+              <button
+                onClick={handleAddSegmentAtPlayhead}
+                className="px-3 py-1.5 text-sm bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
+                title="Add segment at current time (5s duration)"
+              >
+                + Segment
+              </button>
+              <button
+                onClick={handleAddSubtitleAtPlayhead}
+                className="px-3 py-1.5 text-sm bg-cyan-700 hover:bg-cyan-600 rounded transition-colors"
+                title="Add subtitle at current time (3s duration)"
+              >
+                + Subtitle
+              </button>
+            </>
           )}
           {markInTime !== null && (
             <span className="text-xs text-amber-400">
-              Mark in set at {markInTime.toFixed(1)}s — press O to mark out
+              Mark in at {markInTime.toFixed(1)}s — press O to mark out
+            </span>
+          )}
+          {subtitleMarkIn !== null && (
+            <span className="text-xs text-cyan-400">
+              Subtitle mark in at {subtitleMarkIn.toFixed(1)}s — press Shift+O to set end
             </span>
           )}
         </div>
@@ -266,27 +340,57 @@ export default function App() {
             onDurationChange={setDuration}
             onMarkIn={handleMarkIn}
             onMarkOut={handleMarkOut}
+            onAddSubtitle={handleAddSubtitleAtPlayhead}
+            onSubtitleMarkIn={handleSubtitleMarkIn}
+            onSubtitleMarkOut={handleSubtitleMarkOut}
           />
+
+          {/* Subtitle Editor (when pending) */}
+          {pendingSubtitle && (
+            <SubtitleEditor
+              subtitle={pendingSubtitle}
+              onSave={handleSaveSubtitle}
+              onCancel={handleCancelSubtitle}
+            />
+          )}
 
           {/* Timeline */}
           <Timeline
             duration={duration}
             currentTime={currentTime}
             segments={segments}
+            subtitles={subtitles}
             onSeek={setCurrentTime}
             onSegmentUpdate={handleSegmentUpdate}
           />
 
           {/* Bottom panel */}
           <div className="shrink-0 border-t border-zinc-800">
-            <div className="px-4 py-2">
-              <SegmentList
-                segments={segments}
-                onDelete={handleDeleteSegment}
-                onSeek={setCurrentTime}
-              />
+            <div className="px-4 py-2 grid grid-cols-2 gap-4">
+              <div>
+                <h3 className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wider">Segments</h3>
+                <SegmentList
+                  segments={segments}
+                  onDelete={handleDeleteSegment}
+                  onSeek={setCurrentTime}
+                />
+              </div>
+              <div>
+                <h3 className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wider">Subtitles</h3>
+                <SubtitleList
+                  subtitles={subtitles}
+                  onDelete={handleDeleteSubtitle}
+                  onSeek={setCurrentTime}
+                  onEdit={handleEditSubtitle}
+                />
+              </div>
             </div>
-            <ExportPanel inputPath={videoInfo!.path} segments={segments} isFromRecording={isFromRecording} />
+            <ExportPanel
+              inputPath={videoInfo!.path}
+              segments={segments}
+              subtitles={subtitles}
+              isFromRecording={isFromRecording}
+            />
           </div>
         </div>
       )}

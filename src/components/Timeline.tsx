@@ -1,11 +1,12 @@
 import { useRef, useCallback, type MouseEvent } from "react";
-import type { Segment } from "../types";
+import type { Segment, Subtitle } from "../types";
 import { formatTime } from "../utils/format";
 
 interface TimelineProps {
   duration: number;
   currentTime: number;
   segments: Segment[];
+  subtitles: Subtitle[];
   onSeek: (time: number) => void;
   onSegmentUpdate: (id: string, start: number, end: number) => void;
 }
@@ -14,6 +15,7 @@ export default function Timeline({
   duration,
   currentTime,
   segments,
+  subtitles,
   onSeek,
   onSegmentUpdate,
 }: TimelineProps) {
@@ -137,6 +139,24 @@ export default function Timeline({
                 onMouseDown={(e) => handleSegmentMouseDown(e, seg.id, "end")}
               />
             </div>
+          );
+        })}
+
+        {/* Subtitles (smaller markers below segments) */}
+        {subtitles.map((sub) => {
+          const left = (sub.start / duration) * 100;
+          const width = ((sub.end - sub.start) / duration) * 100;
+          return (
+            <div
+              key={sub.id}
+              className="absolute bottom-0 h-2 bg-cyan-600/60 border border-cyan-400/60 rounded-sm hover:bg-cyan-500/80 cursor-pointer"
+              style={{ left: `${left}%`, width: `${width}%` }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSeek(sub.start);
+              }}
+              title={sub.text || "Subtitle"}
+            />
           );
         })}
 

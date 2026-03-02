@@ -2,19 +2,21 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import type { Segment, ExportProgress } from "../types";
+import type { Segment, ExportProgress, Subtitle } from "../types";
 import { formatDuration } from "../utils/format";
 
 interface ExportPanelProps {
   inputPath: string;
   segments: Segment[];
+  subtitles: Subtitle[];
   isFromRecording?: boolean;
 }
 
-export default function ExportPanel({ inputPath, segments, isFromRecording }: ExportPanelProps) {
+export default function ExportPanel({ inputPath, segments, subtitles, isFromRecording }: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
+  const [exportSrt, setExportSrt] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,10 +51,16 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
           start: s.start,
           end: s.end,
         })),
+        subtitles: exportSrt ? subtitles.map((s) => ({
+          start: s.start,
+          end: s.end,
+          text: s.text,
+        })) : [],
         outputPath,
         merge,
         compress,
         quality,
+        burnSubtitles: exportSrt,
       });
 
       // Clean up temp recording file after successful export
@@ -65,7 +73,7 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, merge, compress, quality, isFromRecording]);
+  }, [inputPath, segments, subtitles, merge, compress, quality, exportSrt, isFromRecording]);
 
   const isDisabled = segments.length === 0 || exporting;
 
@@ -100,6 +108,17 @@ export default function ExportPanel({ inputPath, segments, isFromRecording }: Ex
           />
           Compress (smaller file)
         </label>
+        {subtitles.length > 0 && (
+          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={exportSrt}
+              onChange={(e) => setExportSrt(e.target.checked)}
+              className="accent-cyan-500"
+            />
+            Export subtitles as .srt file
+          </label>
+        )}
       </div>
 
       {compress && (

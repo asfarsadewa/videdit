@@ -14,17 +14,45 @@ fn get_video_info(app: tauri::AppHandle, path: String) -> Result<VideoInfo, Stri
     ffmpeg::probe_video(&app, &path)
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct SubtitleInput {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
 #[tauri::command]
 fn export_video(
     app: tauri::AppHandle,
     input_path: String,
     segments: Vec<Segment>,
+    subtitles: Vec<SubtitleInput>,
     output_path: String,
     merge: bool,
     compress: bool,
     quality: u32,
+    burn_subtitles: bool,
 ) -> Result<String, String> {
-    ffmpeg::export_segments(&app, &input_path, &segments, &output_path, merge, compress, quality)
+    let subtitles: Vec<ffmpeg::Subtitle> = subtitles
+        .into_iter()
+        .map(|s| ffmpeg::Subtitle {
+            start: s.start,
+            end: s.end,
+            text: s.text,
+        })
+        .collect();
+    
+    ffmpeg::export_segments(
+        &app,
+        &input_path,
+        &segments,
+        &subtitles,
+        &output_path,
+        merge,
+        compress,
+        quality,
+        burn_subtitles,
+    )
 }
 
 #[tauri::command]
