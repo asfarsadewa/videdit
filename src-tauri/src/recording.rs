@@ -240,15 +240,15 @@ pub fn stop_recording(app: &AppHandle, state: &SharedRecordingState) -> Result<S
         final_output_path.clone()
     };
 
+    state.is_recording = false;
+    state.last_temp_path = Some(result_path.clone());
+
     if std::fs::metadata(&result_path).map(|m| m.len()).unwrap_or(0) == 0 {
         return Err(format!(
             "Recording output is missing or empty: {}",
             result_path.display()
         ));
     }
-
-    state.is_recording = false;
-    state.last_temp_path = Some(result_path.clone());
 
     let path_str = result_path.to_string_lossy().to_string();
     let _ = app.emit("recording-stopped", &path_str);

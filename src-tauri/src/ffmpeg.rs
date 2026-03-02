@@ -247,10 +247,9 @@ pub fn export_segments(
             }
         } else {
             let seg_duration = seg.end - seg.start;
-            // Burning subtitles requires re-encoding
-            if let Some(ref srt) = seg_srt {
-                let srt_escaped = escape_path_for_filter(srt);
-                log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
+            if burn_subtitles {
+                // Always re-encode when burning subtitles so all segments share the same
+                // codec — required for a compatible concat merge.
                 cmd.args([
                     "-y",
                     "-ss",
@@ -269,9 +268,13 @@ pub fn export_segments(
                     "copy",
                     "-avoid_negative_ts",
                     "make_zero",
-                    "-vf",
-                    &format!("subtitles='{}'", srt_escaped),
                 ]);
+                // Only add the subtitle filter when this segment has overlapping cues.
+                if let Some(ref srt) = seg_srt {
+                    let srt_escaped = escape_path_for_filter(srt);
+                    log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
+                    cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
+                }
             } else {
                 // True lossless copy
                 cmd.args([
@@ -506,11 +509,17 @@ fn create_srt_for_segment(
 ) -> Result<Option<PathBuf>, String> {
     let filtered: Vec<Subtitle> = subtitles
         .iter()
-        .filter(|sub| sub.end > seg_start && sub.start < seg_end)
-        .map(|sub| Subtitle {
-            start: (sub.start - seg_start).max(0.0),
-            end: (sub.end - seg_start).max(0.0),
-            text: sub.text.clone(),
+        .filter_map(|sub| {
+            let clipped_start = sub.start.max(seg_start).min(seg_end);
+            let clipped_end = sub.end.min(seg_end).max(seg_start);
+            if clipped_end <= clipped_start {
+                return None;
+            }
+            Some(Subtitle {
+                start: (clipped_start - seg_start).max(0.0),
+                end: (clipped_end - seg_start).max(0.0),
+                text: sub.text.clone(),
+            })
         })
         .collect();
 
@@ -549,10 +558,12 @@ fn create_srt_for_export(
         let mut cumulative_offset = 0.0_f64;
         for seg in segments {
             for sub in subtitles {
-                if sub.end > seg.start && sub.start < seg.end {
+                let clipped_start = sub.start.max(seg.start).min(seg.end);
+                let clipped_end = sub.end.min(seg.end).max(seg.start);
+                if clipped_end > clipped_start {
                     remapped.push(Subtitle {
-                        start: (sub.start - seg.start + cumulative_offset).max(0.0),
-                        end: (sub.end - seg.start + cumulative_offset).max(0.0),
+                        start: (clipped_start - seg.start + cumulative_offset).max(0.0),
+                        end: (clipped_end - seg.start + cumulative_offset).max(0.0),
                         text: sub.text.clone(),
                     });
                 }
@@ -577,11 +588,17 @@ fn create_srt_for_export(
             let srt_path = parent.join(format!("{}_{:03}.srt", stem, i + 1));
             let filtered: Vec<Subtitle> = subtitles
                 .iter()
-                .filter(|sub| sub.end > seg.start && sub.start < seg.end)
-                .map(|sub| Subtitle {
-                    start: (sub.start - seg.start).max(0.0),
-                    end: (sub.end - seg.start).max(0.0),
-                    text: sub.text.clone(),
+                .filter_map(|sub| {
+                    let clipped_start = sub.start.max(seg.start).min(seg.end);
+                    let clipped_end = sub.end.min(seg.end).max(seg.start);
+                    if clipped_end <= clipped_start {
+                        return None;
+                    }
+                    Some(Subtitle {
+                        start: (clipped_start - seg.start).max(0.0),
+                        end: (clipped_end - seg.start).max(0.0),
+                        text: sub.text.clone(),
+                    })
                 })
                 .collect();
             write_srt_to_path(&filtered, &srt_path)?;
