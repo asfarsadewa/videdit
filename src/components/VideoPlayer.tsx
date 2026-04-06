@@ -39,10 +39,11 @@ export default function VideoPlayer({
     currentTimeRef.current = currentTime;
   }, [currentTime]);
 
-  // Create/update/remove audio elements when tracks change
+  // Create/update/remove audio elements when tracks change (diff-based, no full teardown)
   useEffect(() => {
     const els = audioElsRef.current;
 
+    // Remove tracks that no longer exist
     const activeIds = new Set(audioTracks.map((t) => t.id));
     for (const [id, el] of els) {
       if (!activeIds.has(id)) {
@@ -52,6 +53,7 @@ export default function VideoPlayer({
       }
     }
 
+    // Add new tracks or update volume on existing ones
     for (const track of audioTracks) {
       let el = els.get(track.id);
       if (!el) {
@@ -62,15 +64,19 @@ export default function VideoPlayer({
       }
       el.volume = Math.min(track.volume, 1.0);
     }
+  }, [audioTracks]);
 
+  // Full teardown of Audio elements only on unmount
+  useEffect(() => {
     return () => {
+      const els = audioElsRef.current;
       for (const [, el] of els) {
         el.pause();
         el.src = "";
       }
       els.clear();
     };
-  }, [audioTracks]);
+  }, []);
 
   // Sync audio elements with video playback
   const syncAudioTracks = useCallback(

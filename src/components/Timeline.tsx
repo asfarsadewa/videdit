@@ -205,39 +205,71 @@ export default function Timeline({
         </div>
 
         {/* Audio dub track */}
-        {audioTracks.length > 0 && (
-          <div
-            className="relative h-6 bg-zinc-800/60 border-t border-zinc-700/50 rounded-b cursor-pointer"
-            onMouseDown={handleTrackClick}
-          >
-            {audioTracks.map((track) => {
-              const left = (track.start / duration) * 100;
-              const width = ((track.end - track.start) / duration) * 100;
-              return (
-                <div
-                  key={track.id}
-                  className="absolute top-0 h-full bg-amber-600/40 border border-amber-400/50 rounded-sm group flex items-center justify-center overflow-hidden"
-                  style={{ left: `${left}%`, width: `${width}%` }}
-                  onMouseDown={(e) => handleAudioMouseDown(e, track.id, "body")}
-                  title={track.fileName}
-                >
-                  <span className="text-[8px] text-amber-200/70 truncate px-1">{track.fileName}</span>
-                  {track.radioEffect && (
-                    <span className="text-[7px] text-amber-300/50 absolute top-0 right-0.5">AM</span>
-                  )}
-                  <div
-                    className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-l-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                    onMouseDown={(e) => handleAudioMouseDown(e, track.id, "start")}
-                  />
-                  <div
-                    className="absolute right-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-r-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                    onMouseDown={(e) => handleAudioMouseDown(e, track.id, "end")}
-                  />
-                </div>
+        {audioTracks.length > 0 && (() => {
+          const TRACK_H = 24; // px per lane, matches h-6
+          // Pack tracks into non-overlapping lanes using a greedy first-fit algorithm.
+          const lanes: Array<Array<{ start: number; end: number }>> = [];
+          const sorted = [...audioTracks].sort((a, b) => a.start - b.start);
+          const laneOf = new Map<string, number>();
+
+          for (const track of sorted) {
+            let placed = false;
+            for (let l = 0; l < lanes.length; l++) {
+              const overlaps = lanes[l].some(
+                (t) => track.start < t.end && track.end > t.start,
               );
-            })}
-          </div>
-        )}
+              if (!overlaps) {
+                lanes[l].push({ start: track.start, end: track.end });
+                laneOf.set(track.id, l);
+                placed = true;
+                break;
+              }
+            }
+            if (!placed) {
+              lanes.push([{ start: track.start, end: track.end }]);
+              laneOf.set(track.id, lanes.length - 1);
+            }
+          }
+
+          const containerHeight = lanes.length * TRACK_H;
+
+          return (
+            <div
+              className="relative bg-zinc-800/60 border-t border-zinc-700/50 rounded-b cursor-pointer"
+              style={{ height: containerHeight }}
+              onMouseDown={handleTrackClick}
+            >
+              {audioTracks.map((track) => {
+                const left = (track.start / duration) * 100;
+                const width = ((track.end - track.start) / duration) * 100;
+                const lane = laneOf.get(track.id) ?? 0;
+                const top = lane * TRACK_H;
+                return (
+                  <div
+                    key={track.id}
+                    className="absolute h-6 bg-amber-600/40 border border-amber-400/50 rounded-sm group flex items-center justify-center overflow-hidden"
+                    style={{ left: `${left}%`, width: `${width}%`, top }}
+                    onMouseDown={(e) => handleAudioMouseDown(e, track.id, "body")}
+                    title={track.fileName}
+                  >
+                    <span className="text-[8px] text-amber-200/70 truncate px-1">{track.fileName}</span>
+                    {track.radioEffect && (
+                      <span className="text-[7px] text-amber-300/50 absolute top-0 right-0.5">AM</span>
+                    )}
+                    <div
+                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-l-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                      onMouseDown={(e) => handleAudioMouseDown(e, track.id, "start")}
+                    />
+                    <div
+                      className="absolute right-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-r-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                      onMouseDown={(e) => handleAudioMouseDown(e, track.id, "end")}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* Playhead — spans all lanes */}
         <div

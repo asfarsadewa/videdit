@@ -189,6 +189,18 @@ pub fn probe_audio(app: &AppHandle, path: &str) -> Result<AudioInfo, String> {
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
 
+    let has_audio = json["streams"]
+        .as_array()
+        .map(|arr| {
+            !arr.is_empty()
+                && arr[0]["codec_type"].as_str().unwrap_or("") == "audio"
+        })
+        .unwrap_or(false);
+
+    if !has_audio {
+        return Err("No audio stream found".to_string());
+    }
+
     let duration = json["format"]["duration"]
         .as_str()
         .and_then(|d| d.parse::<f64>().ok())
@@ -284,8 +296,13 @@ pub fn export_segments(
             .filter(|a| a.start < seg.end && a.end > seg.start)
             .collect();
 
-        let has_audio_processing = !overlapping_audio.is_empty() || original_radio;
         let seg_duration = seg.end - seg.start;
+
+        // Probe the input to know whether it actually has an audio stream.
+        // This avoids referencing [0:a] in filters when the input has no audio.
+        let input_has_audio = has_audio_stream(app, input_path);
+        let effective_original_radio = original_radio && input_has_audio;
+        let effective_has_audio_processing = !overlapping_audio.is_empty() || effective_original_radio;
 
         let mut cmd = Command::new(&ffmpeg);
         cmd.args(["-y", "-ss", &format!("{:.3}", seg.start), "-i", input_path]);
@@ -295,18 +312,34 @@ pub fn export_segments(
             cmd.args(["-i", &audio.file_path]);
         }
 
-        if has_audio_processing {
+        if effective_has_audio_processing {
             build_audio_filter_cmd(
                 &mut cmd,
                 &overlapping_audio,
-                original_radio,
+                effective_original_radio,
                 original_radio_intensity,
                 seg.start,
                 seg_duration,
                 seg_srt.as_deref(),
                 compress,
                 quality,
+                merge,
+                input_has_audio,
             );
+        } else if merge {
+            // When merging segments, always re-encode to a consistent profile
+            // so the concat demuxer sees identical codec params across all segments.
+            cmd.args([
+                "-t", &format!("{seg_duration:.3}"),
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", &quality.to_string(),
+                "-c:a", "aac", "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero", "-map", "0",
+            ]);
+            if let Some(ref srt) = seg_srt {
+                let srt_escaped = escape_path_for_filter(srt);
+                cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
+            }
         } else if compress {
             cmd.args([
                 "-t", &format!("{seg_duration:.3}"),
@@ -323,7 +356,8 @@ pub fn export_segments(
             cmd.args([
                 "-t", &format!("{seg_duration:.3}"),
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "copy", "-avoid_negative_ts", "make_zero",
+                "-c:a", "aac", "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero",
             ]);
             if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
@@ -523,6 +557,48 @@ fn radio_params(intensity: u32) -> (f64, f64, f64, f64) {
     (low_cut, high_cut, noise_amp, ratio)
 }
 
+/// Quick probe to check whether the input file has at least one audio stream.
+fn has_audio_stream(app: &AppHandle, path: &str) -> bool {
+    let ffprobe = match resolve_sidecar(app, "ffprobe") {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    let mut cmd = Command::new(&ffprobe);
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-select_streams",
+        "a",
+        path,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    json["streams"]
+        .as_array()
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false)
+}
+
 /// Build the FFmpeg filter_complex args for audio mixing + optional radio effect.
 /// Handles both subtitle burning and audio overlay in a single filter graph.
 fn build_audio_filter_cmd(
@@ -535,12 +611,14 @@ fn build_audio_filter_cmd(
     seg_srt: Option<&Path>,
     compress: bool,
     quality: u32,
+    merge: bool,
+    input_has_audio: bool,
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
     let seg_end = seg_start + seg_duration;
 
-    if original_radio {
+    if original_radio && input_has_audio {
         let (low_cut, high_cut, noise_amp, ratio) = radio_params(original_radio_intensity);
         filters.push(format!(
             "[0:a]highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
@@ -551,7 +629,7 @@ fn build_audio_filter_cmd(
         ));
         filters.push("[orig_eq][orig_noise]amix=inputs=2:duration=first[orig_out]".into());
         audio_labels.push("[orig_out]".into());
-    } else {
+    } else if input_has_audio {
         audio_labels.push("[0:a]".into());
     }
 
@@ -601,13 +679,14 @@ fn build_audio_filter_cmd(
         filters.push(format!(
             "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout]"
         ));
-    } else if audio_labels[0] != "[0:a]" {
+    } else if audio_labels.len() == 1 && audio_labels[0] != "[0:a]" {
         let last = filters.last_mut().unwrap();
         let label = audio_labels[0].trim_matches(|c| c == '[' || c == ']');
         *last = last.replace(&format!("[{label}]"), "[aout]");
     }
 
-    let has_aout = audio_labels.len() > 1 || audio_labels[0] != "[0:a]";
+    let has_aout = !audio_labels.is_empty()
+        && (audio_labels.len() > 1 || audio_labels[0] != "[0:a]");
 
     let has_vfilter = seg_srt.is_some();
     if let Some(srt) = seg_srt {
@@ -633,8 +712,8 @@ fn build_audio_filter_cmd(
 
     cmd.args(["-t", &format!("{seg_duration:.3}")]);
 
-    if compress || has_vfilter {
-        let crf = if compress { quality.to_string() } else { "18".into() };
+    if merge || compress || has_vfilter {
+        let crf = if compress || merge { quality.to_string() } else { "18".into() };
         cmd.args(["-c:v", "libx264", "-preset", "medium", "-crf", &crf]);
     } else {
         cmd.args(["-c:v", "copy"]);

@@ -247,16 +247,20 @@ export default function App() {
       const info: { path: string; duration: number } = await invoke("get_audio_info", { path: filePath });
 
       const fileName = filePath.split("\\").pop()?.split("/").pop() ?? "audio";
+      const trackStart = Math.min(currentTime, duration);
       const trackEnd = Math.min(currentTime + info.duration, duration);
-      const trackStart = Math.max(0, trackEnd - info.duration);
+
+      // If currentTime exceeds duration, clamp both to avoid a negative-length clip
+      const clampedStart = trackStart > trackEnd ? duration : trackStart;
+      const clampedEnd = trackStart > trackEnd ? duration : trackEnd;
 
       const newTrack: AudioTrack = {
         id: generateId(),
         filePath: info.path,
         fileName,
         duration: info.duration,
-        start: trackStart,
-        end: trackEnd,
+        start: clampedStart,
+        end: clampedEnd,
         volume: 1.0,
         radioEffect: false,
         radioIntensity: 30,
@@ -269,11 +273,17 @@ export default function App() {
   }, [currentTime, duration]);
 
   const handleUpdateAudioTrack = useCallback((id: string, updates: Partial<AudioTrack>) => {
-    setAudioTracks((prev) =>
-      prev
-        .map((t) => (t.id === id ? { ...t, ...updates } : t))
-        .sort((a, b) => a.start - b.start)
-    );
+    setAudioTracks((prev) => {
+      const next = prev.map((t) => {
+        if (t.id === id) {
+          const updated = { ...t, ...updates };
+          if (updated.start >= updated.end) return t; // reject invalid range
+          return updated;
+        }
+        return t;
+      });
+      return next.sort((a, b) => a.start - b.start);
+    });
   }, []);
 
   const handleDeleteAudioTrack = useCallback((id: string) => {
@@ -282,19 +292,18 @@ export default function App() {
 
   const handleAudioTrackTimeUpdate = useCallback(
     (id: string, start: number, end: number) => {
-      setAudioTracks((prev) =>
-        prev
-          .map((t) =>
-            t.id === id
-              ? {
-                  ...t,
-                  start: Math.max(0, Math.min(start, duration)),
-                  end: Math.max(0, Math.min(end, duration)),
-                }
-              : t
-          )
-          .sort((a, b) => a.start - b.start)
-      );
+      setAudioTracks((prev) => {
+        const next = prev.map((t) => {
+          if (t.id === id) {
+            const clampedStart = Math.max(0, Math.min(start, duration));
+            const clampedEnd = Math.max(0, Math.min(end, duration));
+            if (clampedStart >= clampedEnd) return t; // reject invalid range
+            return { ...t, start: clampedStart, end: clampedEnd };
+          }
+          return t;
+        });
+        return next.sort((a, b) => a.start - b.start);
+      });
     },
     [duration],
   );
