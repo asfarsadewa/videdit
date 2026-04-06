@@ -1,8 +1,11 @@
 import { useRef, useEffect, useCallback } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import type { AudioTrack } from "../types";
 
 interface VideoPlayerProps {
   src: string | null;
   currentTime: number;
+  audioTracks: AudioTrack[];
   onTimeUpdate: (time: number) => void;
   onDurationChange: (duration: number) => void;
   onMarkIn: () => void;
@@ -10,11 +13,13 @@ interface VideoPlayerProps {
   onAddSubtitle: () => void;
   onSubtitleMarkIn: () => void;
   onSubtitleMarkOut: () => void;
+  onAddAudio: () => void;
 }
 
 export default function VideoPlayer({
   src,
   currentTime,
+  audioTracks,
   onTimeUpdate,
   onDurationChange,
   onMarkIn,
@@ -22,15 +27,75 @@ export default function VideoPlayer({
   onAddSubtitle,
   onSubtitleMarkIn,
   onSubtitleMarkOut,
+  onAddAudio,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const isSeeking = useRef(false);
   const currentTimeRef = useRef(currentTime);
+  const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
   // Keep ref updated with current time
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  // Create/update/remove audio elements when tracks change
+  useEffect(() => {
+    const els = audioElsRef.current;
+
+    const activeIds = new Set(audioTracks.map((t) => t.id));
+    for (const [id, el] of els) {
+      if (!activeIds.has(id)) {
+        el.pause();
+        el.src = "";
+        els.delete(id);
+      }
+    }
+
+    for (const track of audioTracks) {
+      let el = els.get(track.id);
+      if (!el) {
+        el = new Audio();
+        el.src = convertFileSrc(track.filePath);
+        el.preload = "auto";
+        els.set(track.id, el);
+      }
+      el.volume = Math.min(track.volume, 1.0);
+    }
+
+    return () => {
+      for (const [, el] of els) {
+        el.pause();
+        el.src = "";
+      }
+      els.clear();
+    };
+  }, [audioTracks]);
+
+  // Sync audio elements with video playback
+  const syncAudioTracks = useCallback(
+    (videoTime: number, playing: boolean) => {
+      for (const track of audioTracks) {
+        const el = audioElsRef.current.get(track.id);
+        if (!el) continue;
+
+        const inRange = videoTime >= track.start && videoTime < track.end;
+        if (inRange && playing) {
+          const targetTime = videoTime - track.start;
+          if (Math.abs(el.currentTime - targetTime) > 0.3) {
+            el.currentTime = targetTime;
+          }
+          if (el.paused) el.play().catch(() => {});
+        } else {
+          if (!el.paused) el.pause();
+          if (inRange) {
+            el.currentTime = videoTime - track.start;
+          }
+        }
+      }
+    },
+    [audioTracks],
+  );
 
   // Sync video time when currentTime changes externally (e.g. timeline click)
   useEffect(() => {
@@ -45,8 +110,9 @@ export default function VideoPlayer({
     const video = videoRef.current;
     if (video && !isSeeking.current) {
       onTimeUpdate(video.currentTime);
+      syncAudioTracks(video.currentTime, !video.paused);
     }
-  }, [onTimeUpdate]);
+  }, [onTimeUpdate, syncAudioTracks]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -57,15 +123,26 @@ export default function VideoPlayer({
 
   const handleSeeking = useCallback(() => {
     isSeeking.current = true;
-  }, []);
+    syncAudioTracks(0, false);
+  }, [syncAudioTracks]);
 
   const handleSeeked = useCallback(() => {
     isSeeking.current = false;
     const video = videoRef.current;
     if (video) {
       onTimeUpdate(video.currentTime);
+      syncAudioTracks(video.currentTime, !video.paused);
     }
-  }, [onTimeUpdate]);
+  }, [onTimeUpdate, syncAudioTracks]);
+
+  const handlePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (video) syncAudioTracks(video.currentTime, true);
+  }, [syncAudioTracks]);
+
+  const handlePause = useCallback(() => {
+    syncAudioTracks(0, false);
+  }, [syncAudioTracks]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -117,15 +194,18 @@ export default function VideoPlayer({
           break;
         case "s":
           e.preventDefault();
-          // Quick add subtitle at current time (3s duration)
           onAddSubtitle();
+          break;
+        case "d":
+          e.preventDefault();
+          onAddAudio();
           break;
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [src, onMarkIn, onMarkOut, onAddSubtitle, onSubtitleMarkIn, onSubtitleMarkOut]);
+  }, [src, onMarkIn, onMarkOut, onAddSubtitle, onSubtitleMarkIn, onSubtitleMarkOut, onAddAudio]);
 
   if (!src) {
     return null;
@@ -142,6 +222,8 @@ export default function VideoPlayer({
         onLoadedMetadata={handleLoadedMetadata}
         onSeeking={handleSeeking}
         onSeeked={handleSeeked}
+        onPlay={handlePlay}
+        onPause={handlePause}
       />
     </div>
   );

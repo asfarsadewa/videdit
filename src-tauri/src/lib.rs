@@ -4,7 +4,7 @@ mod recording;
 
 use std::sync::{Arc, Mutex};
 
-use ffmpeg::{Segment, VideoInfo};
+use ffmpeg::{AudioInfo, AudioTrack, Segment, VideoInfo};
 use recording::SharedRecordingState;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -12,6 +12,11 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 #[tauri::command]
 fn get_video_info(app: tauri::AppHandle, path: String) -> Result<VideoInfo, String> {
     ffmpeg::probe_video(&app, &path)
+}
+
+#[tauri::command]
+fn get_audio_info(app: tauri::AppHandle, path: String) -> Result<AudioInfo, String> {
+    ffmpeg::probe_audio(&app, &path)
 }
 
 #[tauri::command]
@@ -25,6 +30,9 @@ fn export_video(
     compress: bool,
     quality: u32,
     burn_subtitles: bool,
+    audio_tracks: Vec<AudioTrack>,
+    original_radio: bool,
+    original_radio_intensity: u32,
 ) -> Result<String, String> {
     for (i, sub) in subtitles.iter().enumerate() {
         if sub.start < 0.0 {
@@ -51,6 +59,9 @@ fn export_video(
         compress,
         quality,
         burn_subtitles,
+        &audio_tracks,
+        original_radio,
+        original_radio_intensity,
     )
 }
 
@@ -128,6 +139,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_video_info,
+            get_audio_info,
             export_video,
             start_screen_recording,
             stop_screen_recording,

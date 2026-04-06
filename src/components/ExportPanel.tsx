@@ -2,21 +2,24 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import type { Segment, ExportProgress, Subtitle } from "../types";
+import type { Segment, ExportProgress, Subtitle, AudioTrack } from "../types";
 import { formatDuration } from "../utils/format";
 
 interface ExportPanelProps {
   inputPath: string;
   segments: Segment[];
   subtitles: Subtitle[];
+  audioTracks: AudioTrack[];
   isFromRecording?: boolean;
 }
 
-export default function ExportPanel({ inputPath, segments, subtitles, isFromRecording }: ExportPanelProps) {
+export default function ExportPanel({ inputPath, segments, subtitles, audioTracks, isFromRecording }: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
   const [subtitleOption, setSubtitleOption] = useState<'none' | 'srt' | 'burn'>('none');
+  const [originalRadio, setOriginalRadio] = useState(false);
+  const [originalRadioIntensity, setOriginalRadioIntensity] = useState(30);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +70,17 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
         compress,
         quality,
         burnSubtitles: subtitleOption === 'burn',
+        audioTracks: audioTracks.map((t) => ({
+          id: t.id,
+          file_path: t.filePath,
+          start: t.start,
+          end: t.end,
+          volume: t.volume,
+          radio_effect: t.radioEffect,
+          radio_intensity: t.radioIntensity,
+        })),
+        originalRadio,
+        originalRadioIntensity,
       });
 
       // Clean up temp recording file after successful export
@@ -79,7 +93,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, merge, compress, quality, subtitleOption, isFromRecording]);
+  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, isFromRecording]);
 
   const isDisabled =
     (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
@@ -174,11 +188,47 @@ export default function ExportPanel({ inputPath, segments, subtitles, isFromReco
         </div>
       )}
 
+      {/* Original audio radio effect */}
+      <div className="flex items-center gap-4">
+        <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={originalRadio}
+            onChange={(e) => setOriginalRadio(e.target.checked)}
+            className="accent-amber-500"
+          />
+          AM/SW radio effect on original audio
+        </label>
+        {originalRadio && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-600">AM</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={originalRadioIntensity}
+              onChange={(e) => setOriginalRadioIntensity(Number(e.target.value))}
+              className="w-24 accent-amber-500"
+            />
+            <span className="text-xs text-zinc-600">SW</span>
+          </div>
+        )}
+      </div>
+
+      {audioTracks.length > 0 && (
+        <p className="text-xs text-amber-500/70">
+          {audioTracks.length} audio track{audioTracks.length !== 1 ? "s" : ""} will be mixed into the export
+          {audioTracks.some((t) => t.radioEffect) && " (includes AM/SW processing)"}
+        </p>
+      )}
+
       {/* Keyframe notice */}
       <p className="text-xs text-zinc-600">
         {compress
           ? "Re-encoded export — frame-accurate cuts."
-          : "Lossless export — cuts occur at nearest keyframe (±1-2s accuracy)."}
+          : audioTracks.length > 0 || originalRadio
+            ? "Video copied losslessly, audio re-encoded for mixing."
+            : "Lossless export — cuts occur at nearest keyframe (±1-2s accuracy)."}
       </p>
 
       {/* Progress bar */}

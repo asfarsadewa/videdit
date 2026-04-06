@@ -29,6 +29,23 @@ pub struct Subtitle {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AudioTrack {
+    pub id: String,
+    pub file_path: String,
+    pub start: f64,
+    pub end: f64,
+    pub volume: f64,
+    pub radio_effect: bool,
+    pub radio_intensity: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AudioInfo {
+    pub path: String,
+    pub duration: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportProgress {
     pub segment_index: usize,
     pub total_segments: usize,
@@ -141,6 +158,52 @@ pub fn probe_video(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
     })
 }
 
+pub fn probe_audio(app: &AppHandle, path: &str) -> Result<AudioInfo, String> {
+    let ffprobe = resolve_sidecar(app, "ffprobe")?;
+
+    let mut cmd = Command::new(&ffprobe);
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-select_streams",
+        "a:0",
+        path,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    hide_console_window(&mut cmd);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run ffprobe: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffprobe failed: {stderr}"));
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
+
+    let duration = json["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    if duration <= 0.0 {
+        return Err("Could not determine audio duration".to_string());
+    }
+
+    Ok(AudioInfo {
+        path: path.to_string(),
+        duration,
+    })
+}
+
 fn parse_fps(rate: &str) -> f64 {
     let parts: Vec<&str> = rate.split('/').collect();
     if parts.len() == 2 {
@@ -163,6 +226,9 @@ pub fn export_segments(
     compress: bool,
     quality: u32,
     burn_subtitles: bool,
+    audio_tracks: &[AudioTrack],
+    original_radio: bool,
+    original_radio_intensity: u32,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
@@ -212,88 +278,64 @@ pub fn export_segments(
             None
         };
 
+        // Find audio tracks overlapping this segment
+        let overlapping_audio: Vec<&AudioTrack> = audio_tracks
+            .iter()
+            .filter(|a| a.start < seg.end && a.end > seg.start)
+            .collect();
+
+        let has_audio_processing = !overlapping_audio.is_empty() || original_radio;
+        let seg_duration = seg.end - seg.start;
+
         let mut cmd = Command::new(&ffmpeg);
-        if compress {
-            let seg_duration = seg.end - seg.start;
+        cmd.args(["-y", "-ss", &format!("{:.3}", seg.start), "-i", input_path]);
+
+        // Additional audio file inputs (one per overlapping track)
+        for audio in &overlapping_audio {
+            cmd.args(["-i", &audio.file_path]);
+        }
+
+        if has_audio_processing {
+            build_audio_filter_cmd(
+                &mut cmd,
+                &overlapping_audio,
+                original_radio,
+                original_radio_intensity,
+                seg.start,
+                seg_duration,
+                seg_srt.as_deref(),
+                compress,
+                quality,
+            );
+        } else if compress {
             cmd.args([
-                "-y",
-                "-ss",
-                &format!("{:.3}", seg.start),
-                "-i",
-                input_path,
-                "-t",
-                &format!("{:.3}", seg_duration),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                &quality.to_string(),
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-avoid_negative_ts",
-                "make_zero",
-                "-map",
-                "0",
+                "-t", &format!("{seg_duration:.3}"),
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", &quality.to_string(),
+                "-c:a", "aac", "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero", "-map", "0",
             ]);
-            
-            // Add subtitle filter if burning
             if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
-                log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
+                cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
+            }
+        } else if burn_subtitles {
+            cmd.args([
+                "-t", &format!("{seg_duration:.3}"),
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "copy", "-avoid_negative_ts", "make_zero",
+            ]);
+            if let Some(ref srt) = seg_srt {
+                let srt_escaped = escape_path_for_filter(srt);
                 cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
             }
         } else {
-            let seg_duration = seg.end - seg.start;
-            if burn_subtitles {
-                // Always re-encode when burning subtitles so all segments share the same
-                // codec — required for a compatible concat merge.
-                cmd.args([
-                    "-y",
-                    "-ss",
-                    &format!("{:.3}", seg.start),
-                    "-i",
-                    input_path,
-                    "-t",
-                    &format!("{:.3}", seg_duration),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "18",
-                    "-c:a",
-                    "copy",
-                    "-avoid_negative_ts",
-                    "make_zero",
-                ]);
-                // Only add the subtitle filter when this segment has overlapping cues.
-                if let Some(ref srt) = seg_srt {
-                    let srt_escaped = escape_path_for_filter(srt);
-                    log::info!("Adding subtitle filter with SRT: {}", srt_escaped);
-                    cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
-                }
-            } else {
-                // True lossless copy
-                cmd.args([
-                    "-y",
-                    "-ss",
-                    &format!("{:.3}", seg.start),
-                    "-i",
-                    input_path,
-                    "-t",
-                    &format!("{:.3}", seg_duration),
-                    "-c",
-                    "copy",
-                    "-avoid_negative_ts",
-                    "make_zero",
-                    "-map",
-                    "0",
-                ]);
-            }
+            cmd.args([
+                "-t", &format!("{seg_duration:.3}"),
+                "-c", "copy", "-avoid_negative_ts", "make_zero", "-map", "0",
+            ]);
         }
+
         cmd.arg(out_file.to_str().unwrap())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -468,6 +510,136 @@ fn escape_path_for_filter(path: &std::path::Path) -> String {
     } else {
         s
     }
+}
+
+/// Radio effect parameters interpolated by intensity (0–100).
+/// Returns (highpass_freq, lowpass_freq, noise_amplitude, compressor_ratio).
+fn radio_params(intensity: u32) -> (f64, f64, f64, f64) {
+    let t = (intensity.min(100) as f64) / 100.0;
+    let low_cut = 200.0 + t * 300.0;
+    let high_cut = 4000.0 - t * 1200.0;
+    let noise_amp = 0.005 + t * 0.030;
+    let ratio = 2.0 + t * 6.0;
+    (low_cut, high_cut, noise_amp, ratio)
+}
+
+/// Build the FFmpeg filter_complex args for audio mixing + optional radio effect.
+/// Handles both subtitle burning and audio overlay in a single filter graph.
+fn build_audio_filter_cmd(
+    cmd: &mut Command,
+    overlapping_audio: &[&AudioTrack],
+    original_radio: bool,
+    original_radio_intensity: u32,
+    seg_start: f64,
+    seg_duration: f64,
+    seg_srt: Option<&Path>,
+    compress: bool,
+    quality: u32,
+) {
+    let mut filters: Vec<String> = Vec::new();
+    let mut audio_labels: Vec<String> = Vec::new();
+    let seg_end = seg_start + seg_duration;
+
+    if original_radio {
+        let (low_cut, high_cut, noise_amp, ratio) = radio_params(original_radio_intensity);
+        filters.push(format!(
+            "[0:a]highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
+             acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[orig_eq]"
+        ));
+        filters.push(format!(
+            "anoisesrc=d={seg_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[orig_noise]"
+        ));
+        filters.push("[orig_eq][orig_noise]amix=inputs=2:duration=first[orig_out]".into());
+        audio_labels.push("[orig_out]".into());
+    } else {
+        audio_labels.push("[0:a]".into());
+    }
+
+    for (j, audio) in overlapping_audio.iter().enumerate() {
+        let input_idx = j + 1;
+        let overlap_start = audio.start.max(seg_start);
+        let overlap_end = audio.end.min(seg_end);
+        let audio_file_offset = overlap_start - audio.start;
+        let audio_file_end = audio_file_offset + (overlap_end - overlap_start);
+        let delay_ms = ((overlap_start - seg_start) * 1000.0).round() as i64;
+        let vol = audio.volume.clamp(0.0, 2.0);
+
+        let base = format!(
+            "[{input_idx}:a]atrim=start={audio_file_offset:.3}:end={audio_file_end:.3},\
+             asetpts=PTS-STARTPTS,volume={vol:.2}"
+        );
+
+        if audio.radio_effect {
+            let (low_cut, high_cut, noise_amp, ratio) = radio_params(audio.radio_intensity);
+            let eq_label = format!("dub{j}_eq");
+            filters.push(format!(
+                "{base},highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
+                 acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50,\
+                 adelay={delay_ms}|{delay_ms},apad[{eq_label}]"
+            ));
+            let noise_label = format!("dub{j}_n");
+            filters.push(format!(
+                "anoisesrc=d={seg_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]"
+            ));
+            let out_label = format!("dub{j}");
+            filters.push(format!(
+                "[{eq_label}][{noise_label}]amix=inputs=2:duration=first[{out_label}]"
+            ));
+            audio_labels.push(format!("[{out_label}]"));
+        } else {
+            let out_label = format!("dub{j}");
+            filters.push(format!(
+                "{base},adelay={delay_ms}|{delay_ms},apad[{out_label}]"
+            ));
+            audio_labels.push(format!("[{out_label}]"));
+        }
+    }
+
+    if audio_labels.len() > 1 {
+        let mix_in: String = audio_labels.join("");
+        let n = audio_labels.len();
+        filters.push(format!(
+            "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout]"
+        ));
+    } else if audio_labels[0] != "[0:a]" {
+        let last = filters.last_mut().unwrap();
+        let label = audio_labels[0].trim_matches(|c| c == '[' || c == ']');
+        *last = last.replace(&format!("[{label}]"), "[aout]");
+    }
+
+    let has_aout = audio_labels.len() > 1 || audio_labels[0] != "[0:a]";
+
+    let has_vfilter = seg_srt.is_some();
+    if let Some(srt) = seg_srt {
+        let srt_escaped = escape_path_for_filter(srt);
+        filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
+    }
+
+    let filter_complex = filters.join(";");
+    log::info!("Audio filter_complex: {}", filter_complex);
+    cmd.args(["-filter_complex", &filter_complex]);
+
+    if has_vfilter {
+        cmd.args(["-map", "[vout]"]);
+    } else {
+        cmd.args(["-map", "0:v"]);
+    }
+
+    if has_aout {
+        cmd.args(["-map", "[aout]"]);
+    } else {
+        cmd.args(["-map", "0:a?"]);
+    }
+
+    cmd.args(["-t", &format!("{seg_duration:.3}")]);
+
+    if compress || has_vfilter {
+        let crf = if compress { quality.to_string() } else { "18".into() };
+        cmd.args(["-c:v", "libx264", "-preset", "medium", "-crf", &crf]);
+    } else {
+        cmd.args(["-c:v", "copy"]);
+    }
+    cmd.args(["-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero"]);
 }
 
 fn parse_ffmpeg_time(line: &str) -> Option<f64> {

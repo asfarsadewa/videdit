@@ -10,7 +10,8 @@ import ExportPanel from "./components/ExportPanel";
 import RecordingIndicator from "./components/RecordingIndicator";
 import SubtitleEditor from "./components/SubtitleEditor";
 import SubtitleList from "./components/SubtitleList";
-import type { VideoInfo, Segment, RecordingStartedPayload, Subtitle } from "./types";
+import AudioDubPanel from "./components/AudioDubPanel";
+import type { VideoInfo, Segment, RecordingStartedPayload, Subtitle, AudioTrack } from "./types";
 import { generateId, clamp } from "./utils/format";
 
 export default function App() {
@@ -29,12 +30,14 @@ export default function App() {
   const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
   const [pendingSubtitle, setPendingSubtitle] = useState<Subtitle | null>(null);
   const [subtitleMarkIn, setSubtitleMarkIn] = useState<number | null>(null);
+  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
 
   const loadVideo = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     setSegments([]);
     setSubtitles([]);
+    setAudioTracks([]);
     setCurrentTime(0);
     setMarkInTime(null);
     setSubtitleMarkIn(null);
@@ -227,6 +230,75 @@ export default function App() {
     setPendingSubtitle(subtitle);
   }, []);
 
+  const handleAddAudio = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          {
+            name: "Audio",
+            extensions: ["mp3", "wav", "ogg", "flac", "aac", "m4a", "wma", "opus"],
+          },
+        ],
+      });
+      if (!selected) return;
+
+      const filePath = typeof selected === "string" ? selected : selected;
+      const info: { path: string; duration: number } = await invoke("get_audio_info", { path: filePath });
+
+      const fileName = filePath.split("\\").pop()?.split("/").pop() ?? "audio";
+      const trackEnd = Math.min(currentTime + info.duration, duration);
+      const trackStart = Math.max(0, trackEnd - info.duration);
+
+      const newTrack: AudioTrack = {
+        id: generateId(),
+        filePath: info.path,
+        fileName,
+        duration: info.duration,
+        start: trackStart,
+        end: trackEnd,
+        volume: 1.0,
+        radioEffect: false,
+        radioIntensity: 30,
+      };
+
+      setAudioTracks((prev) => [...prev, newTrack].sort((a, b) => a.start - b.start));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [currentTime, duration]);
+
+  const handleUpdateAudioTrack = useCallback((id: string, updates: Partial<AudioTrack>) => {
+    setAudioTracks((prev) =>
+      prev
+        .map((t) => (t.id === id ? { ...t, ...updates } : t))
+        .sort((a, b) => a.start - b.start)
+    );
+  }, []);
+
+  const handleDeleteAudioTrack = useCallback((id: string) => {
+    setAudioTracks((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const handleAudioTrackTimeUpdate = useCallback(
+    (id: string, start: number, end: number) => {
+      setAudioTracks((prev) =>
+        prev
+          .map((t) =>
+            t.id === id
+              ? {
+                  ...t,
+                  start: Math.max(0, Math.min(start, duration)),
+                  end: Math.max(0, Math.min(end, duration)),
+                }
+              : t
+          )
+          .sort((a, b) => a.start - b.start)
+      );
+    },
+    [duration],
+  );
+
   return (
     <div
       className="flex flex-col h-screen bg-zinc-900 text-zinc-100 overflow-hidden"
@@ -271,6 +343,13 @@ export default function App() {
                 title="Add subtitle at current time (3s duration)"
               >
                 + Subtitle
+              </button>
+              <button
+                onClick={handleAddAudio}
+                className="px-3 py-1.5 text-sm bg-amber-700 hover:bg-amber-600 rounded transition-colors"
+                title="Dub audio at current time (D)"
+              >
+                + Audio
               </button>
             </>
           )}
@@ -344,6 +423,7 @@ export default function App() {
           <VideoPlayer
             src={videoSrc}
             currentTime={currentTime}
+            audioTracks={audioTracks}
             onTimeUpdate={setCurrentTime}
             onDurationChange={setDuration}
             onMarkIn={handleMarkIn}
@@ -351,6 +431,7 @@ export default function App() {
             onAddSubtitle={handleAddSubtitleAtPlayhead}
             onSubtitleMarkIn={handleSubtitleMarkIn}
             onSubtitleMarkOut={handleSubtitleMarkOut}
+            onAddAudio={handleAddAudio}
           />
 
           {/* Subtitle Editor (when pending) */}
@@ -368,13 +449,15 @@ export default function App() {
             currentTime={currentTime}
             segments={segments}
             subtitles={subtitles}
+            audioTracks={audioTracks}
             onSeek={setCurrentTime}
             onSegmentUpdate={handleSegmentUpdate}
+            onAudioTrackUpdate={handleAudioTrackTimeUpdate}
           />
 
           {/* Bottom panel */}
           <div className="shrink-0 border-t border-zinc-800">
-            <div className="px-4 py-2 grid grid-cols-2 gap-4">
+            <div className="px-4 py-2 grid grid-cols-3 gap-4">
               <div>
                 <h3 className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wider">Segments</h3>
                 <SegmentList
@@ -392,11 +475,29 @@ export default function App() {
                   onEdit={handleEditSubtitle}
                 />
               </div>
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Audio Dub</h3>
+                  <button
+                    onClick={handleAddAudio}
+                    className="px-2 py-0.5 text-[10px] bg-amber-700 hover:bg-amber-600 rounded transition-colors text-white"
+                  >
+                    + Audio
+                  </button>
+                </div>
+                <AudioDubPanel
+                  audioTracks={audioTracks}
+                  onUpdate={handleUpdateAudioTrack}
+                  onDelete={handleDeleteAudioTrack}
+                  onSeek={setCurrentTime}
+                />
+              </div>
             </div>
             <ExportPanel
               inputPath={videoInfo!.path}
               segments={segments}
               subtitles={subtitles}
+              audioTracks={audioTracks}
               isFromRecording={isFromRecording}
             />
           </div>

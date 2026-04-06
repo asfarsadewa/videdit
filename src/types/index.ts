@@ -41,3 +41,15 @@ export interface Subtitle {
   end: number;
   text: string;
 }
+
+export interface AudioTrack {
+  id: string;
+  filePath: string;
+  fileName: string;
+  duration: number;
+  start: number;
+  end: number;
+  volume: number;
+  radioEffect: boolean;
+  radioIntensity: number;
+}
