@@ -44,11 +44,12 @@ export interface Subtitle {
 
 export interface AudioTrack {
   id: string;
+  segmentId: string;     // Which segment this audio is attached to
   filePath: string;
   fileName: string;
   duration: number;
-  start: number;
-  end: number;
+  audioSourceStart: number;  // Start time within the audio file (trim start)
+  audioSourceEnd: number;    // End time within the audio file (trim end)
   volume: number;
   radioEffect: boolean;
   radioIntensity: number;

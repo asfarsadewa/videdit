@@ -1,5 +1,5 @@
 import { useRef, useCallback, type MouseEvent } from "react";
-import type { Segment, Subtitle, AudioTrack } from "../types";
+import type { Segment, Subtitle } from "../types";
 import { formatTime } from "../utils/format";
 
 interface TimelineProps {
@@ -7,10 +7,8 @@ interface TimelineProps {
   currentTime: number;
   segments: Segment[];
   subtitles: Subtitle[];
-  audioTracks: AudioTrack[];
   onSeek: (time: number) => void;
   onSegmentUpdate: (id: string, start: number, end: number) => void;
-  onAudioTrackUpdate: (id: string, start: number, end: number) => void;
 }
 
 export default function Timeline({
@@ -18,15 +16,13 @@ export default function Timeline({
   currentTime,
   segments,
   subtitles,
-  audioTracks,
   onSeek,
   onSegmentUpdate,
-  onAudioTrackUpdate,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef<{
     id: string;
-    type: "segment" | "audio";
+    type: "segment";
     handle: "start" | "end" | "body";
     offsetRatio: number;
   } | null>(null);
@@ -40,14 +36,6 @@ export default function Timeline({
       return ratio * duration;
     },
     [duration],
-  );
-
-  const handleTrackClick = useCallback(
-    (e: MouseEvent) => {
-      if (dragging.current) return;
-      onSeek(getTimeFromX(e.clientX));
-    },
-    [getTimeFromX, onSeek],
   );
 
   const handleSegmentMouseDown = useCallback(
@@ -90,46 +78,6 @@ export default function Timeline({
     [segments, duration, getTimeFromX, onSegmentUpdate],
   );
 
-  const handleAudioMouseDown = useCallback(
-    (e: MouseEvent, trackId: string, handle: "start" | "end" | "body") => {
-      e.stopPropagation();
-      const track = audioTracks.find((a) => a.id === trackId);
-      if (!track) return;
-
-      const time = getTimeFromX(e.clientX);
-      const offsetRatio = handle === "body" ? (time - track.start) / duration : 0;
-      dragging.current = { id: trackId, type: "audio", handle, offsetRatio };
-
-      function onMouseMove(ev: globalThis.MouseEvent) {
-        if (!dragging.current || !trackRef.current) return;
-        const d = dragging.current;
-        const t = getTimeFromX(ev.clientX);
-        const a = audioTracks.find((a) => a.id === d.id);
-        if (!a) return;
-
-        if (d.handle === "start") {
-          onAudioTrackUpdate(d.id, Math.min(t, a.end - 0.1), a.end);
-        } else if (d.handle === "end") {
-          onAudioTrackUpdate(d.id, a.start, Math.max(t, a.start + 0.1));
-        } else {
-          const len = a.end - a.start;
-          const newStart = Math.max(0, Math.min(duration - len, t - d.offsetRatio * duration));
-          onAudioTrackUpdate(d.id, newStart, newStart + len);
-        }
-      }
-
-      function onMouseUp() {
-        dragging.current = null;
-        window.removeEventListener("mousemove", onMouseMove);
-        window.removeEventListener("mouseup", onMouseUp);
-      }
-
-      window.addEventListener("mousemove", onMouseMove);
-      window.addEventListener("mouseup", onMouseUp);
-    },
-    [audioTracks, duration, getTimeFromX, onAudioTrackUpdate],
-  );
-
   if (duration <= 0) return null;
 
   const playheadPos = (currentTime / duration) * 100;
@@ -162,7 +110,9 @@ export default function Timeline({
         <div
           ref={trackRef}
           className="relative h-10 bg-zinc-800 rounded-t cursor-pointer"
-          onMouseDown={handleTrackClick}
+          onMouseDown={(e) => {
+            if (!dragging.current) onSeek(getTimeFromX(e.clientX));
+          }}
         >
           {segments.map((seg) => {
             const left = (seg.start / duration) * 100;
@@ -203,73 +153,6 @@ export default function Timeline({
             );
           })}
         </div>
-
-        {/* Audio dub track */}
-        {audioTracks.length > 0 && (() => {
-          const TRACK_H = 24; // px per lane, matches h-6
-          // Pack tracks into non-overlapping lanes using a greedy first-fit algorithm.
-          const lanes: Array<Array<{ start: number; end: number }>> = [];
-          const sorted = [...audioTracks].sort((a, b) => a.start - b.start);
-          const laneOf = new Map<string, number>();
-
-          for (const track of sorted) {
-            let placed = false;
-            for (let l = 0; l < lanes.length; l++) {
-              const overlaps = lanes[l].some(
-                (t) => track.start < t.end && track.end > t.start,
-              );
-              if (!overlaps) {
-                lanes[l].push({ start: track.start, end: track.end });
-                laneOf.set(track.id, l);
-                placed = true;
-                break;
-              }
-            }
-            if (!placed) {
-              lanes.push([{ start: track.start, end: track.end }]);
-              laneOf.set(track.id, lanes.length - 1);
-            }
-          }
-
-          const containerHeight = lanes.length * TRACK_H;
-
-          return (
-            <div
-              className="relative bg-zinc-800/60 border-t border-zinc-700/50 rounded-b cursor-pointer"
-              style={{ height: containerHeight }}
-              onMouseDown={handleTrackClick}
-            >
-              {audioTracks.map((track) => {
-                const left = (track.start / duration) * 100;
-                const width = ((track.end - track.start) / duration) * 100;
-                const lane = laneOf.get(track.id) ?? 0;
-                const top = lane * TRACK_H;
-                return (
-                  <div
-                    key={track.id}
-                    className="absolute h-6 bg-amber-600/40 border border-amber-400/50 rounded-sm group flex items-center justify-center overflow-hidden"
-                    style={{ left: `${left}%`, width: `${width}%`, top }}
-                    onMouseDown={(e) => handleAudioMouseDown(e, track.id, "body")}
-                    title={track.fileName}
-                  >
-                    <span className="text-[8px] text-amber-200/70 truncate px-1">{track.fileName}</span>
-                    {track.radioEffect && (
-                      <span className="text-[7px] text-amber-300/50 absolute top-0 right-0.5">AM</span>
-                    )}
-                    <div
-                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-l-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                      onMouseDown={(e) => handleAudioMouseDown(e, track.id, "start")}
-                    />
-                    <div
-                      className="absolute right-0 top-0 w-1.5 h-full cursor-col-resize bg-amber-400/70 rounded-r-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                      onMouseDown={(e) => handleAudioMouseDown(e, track.id, "end")}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
 
         {/* Playhead — spans all lanes */}
         <div

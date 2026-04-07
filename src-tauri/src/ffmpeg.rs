@@ -31,9 +31,12 @@ pub struct Subtitle {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AudioTrack {
     pub id: String,
+    pub segment_id: String,
+    pub segment_start: f64,
+    pub segment_end: f64,
     pub file_path: String,
-    pub start: f64,
-    pub end: f64,
+    pub audio_source_start: f64,
+    pub audio_source_end: f64,
     pub volume: f64,
     pub radio_effect: bool,
     pub radio_intensity: u32,
@@ -290,10 +293,10 @@ pub fn export_segments(
             None
         };
 
-        // Find audio tracks overlapping this segment
+        // Find audio tracks that belong to this segment
         let overlapping_audio: Vec<&AudioTrack> = audio_tracks
             .iter()
-            .filter(|a| a.start < seg.end && a.end > seg.start)
+            .filter(|a| a.segment_id == seg.id)
             .collect();
 
         let seg_duration = seg.end - seg.start;
@@ -307,8 +310,12 @@ pub fn export_segments(
         let mut cmd = Command::new(&ffmpeg);
         cmd.args(["-y", "-ss", &format!("{:.3}", seg.start), "-i", input_path]);
 
-        // Additional audio file inputs (one per overlapping track)
+        // Additional audio file inputs with seeking to avoid loading entire files
         for audio in &overlapping_audio {
+            // Seek to audio source start and limit duration
+            let audio_duration = audio.audio_source_end - audio.audio_source_start;
+            cmd.args(["-ss", &format!("{:.3}", audio.audio_source_start)]);
+            cmd.args(["-t", &format!("{:.3}", audio_duration)]);
             cmd.args(["-i", &audio.file_path]);
         }
 
@@ -635,16 +642,13 @@ fn build_audio_filter_cmd(
 
     for (j, audio) in overlapping_audio.iter().enumerate() {
         let input_idx = j + 1;
-        let overlap_start = audio.start.max(seg_start);
-        let overlap_end = audio.end.min(seg_end);
-        let audio_file_offset = overlap_start - audio.start;
-        let audio_file_end = audio_file_offset + (overlap_end - overlap_start);
-        let delay_ms = ((overlap_start - seg_start) * 1000.0).round() as i64;
         let vol = audio.volume.clamp(0.0, 2.0);
+        let audio_duration = audio.audio_source_end - audio.audio_source_start;
+        let effective_duration = audio_duration.min(seg_duration);
 
+        // Audio is already trimmed at input level, just apply volume and effects
         let base = format!(
-            "[{input_idx}:a]atrim=start={audio_file_offset:.3}:end={audio_file_end:.3},\
-             asetpts=PTS-STARTPTS,volume={vol:.2}"
+            "[{input_idx}:a]asetpts=PTS-STARTPTS,volume={vol:.2}"
         );
 
         if audio.radio_effect {
@@ -652,12 +656,11 @@ fn build_audio_filter_cmd(
             let eq_label = format!("dub{j}_eq");
             filters.push(format!(
                 "{base},highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
-                 acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50,\
-                 adelay={delay_ms}|{delay_ms},apad[{eq_label}]"
+                 acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[{eq_label}]"
             ));
             let noise_label = format!("dub{j}_n");
             filters.push(format!(
-                "anoisesrc=d={seg_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]"
+                "anoisesrc=d={effective_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]"
             ));
             let out_label = format!("dub{j}");
             filters.push(format!(
@@ -666,9 +669,7 @@ fn build_audio_filter_cmd(
             audio_labels.push(format!("[{out_label}]"));
         } else {
             let out_label = format!("dub{j}");
-            filters.push(format!(
-                "{base},adelay={delay_ms}|{delay_ms},apad[{out_label}]"
-            ));
+            filters.push(format!("{base}[{out_label}]"));
             audio_labels.push(format!("[{out_label}]"));
         }
     }

@@ -230,7 +230,7 @@ export default function App() {
     setPendingSubtitle(subtitle);
   }, []);
 
-  const handleAddAudio = useCallback(async () => {
+  const handleAddAudio = useCallback(async (segmentId: string) => {
     try {
       const selected = await open({
         multiple: false,
@@ -247,42 +247,59 @@ export default function App() {
       const info: { path: string; duration: number } = await invoke("get_audio_info", { path: filePath });
 
       const fileName = filePath.split("\\").pop()?.split("/").pop() ?? "audio";
-      const trackStart = Math.min(currentTime, duration);
-      const trackEnd = Math.min(currentTime + info.duration, duration);
+      
+      // Check if segment already has an audio track
+      const existingTrack = audioTracks.find(t => t.segmentId === segmentId);
+      if (existingTrack) {
+        // Update existing track
+        const updatedTrack = {
+          ...existingTrack,
+          filePath: info.path,
+          fileName,
+          duration: info.duration,
+          audioSourceStart: 0,
+          audioSourceEnd: info.duration,
+        };
+        setAudioTracks((prev) => prev.map(t => t.id === existingTrack.id ? updatedTrack : t));
+      } else {
+        // Create new audio track for this segment
+        const segment = segments.find(s => s.id === segmentId);
+        if (!segment) return;
+        
+        const segmentDuration = segment.end - segment.start;
+        const audioSourceEnd = Math.min(info.duration, segmentDuration);
+        
+        const newTrack: AudioTrack = {
+          id: generateId(),
+          segmentId,
+          filePath: info.path,
+          fileName,
+          duration: info.duration,
+          audioSourceStart: 0,
+          audioSourceEnd,
+          volume: 1.0,
+          radioEffect: false,
+          radioIntensity: 30,
+        };
 
-      // If currentTime exceeds duration, clamp both to avoid a negative-length clip
-      const clampedStart = trackStart > trackEnd ? duration : trackStart;
-      const clampedEnd = trackStart > trackEnd ? duration : trackEnd;
-
-      const newTrack: AudioTrack = {
-        id: generateId(),
-        filePath: info.path,
-        fileName,
-        duration: info.duration,
-        start: clampedStart,
-        end: clampedEnd,
-        volume: 1.0,
-        radioEffect: false,
-        radioIntensity: 30,
-      };
-
-      setAudioTracks((prev) => [...prev, newTrack].sort((a, b) => a.start - b.start));
+        setAudioTracks((prev) => [...prev, newTrack]);
+      }
     } catch (e) {
       setError(String(e));
     }
-  }, [currentTime, duration]);
+  }, [audioTracks, segments]);
 
   const handleUpdateAudioTrack = useCallback((id: string, updates: Partial<AudioTrack>) => {
     setAudioTracks((prev) => {
       const next = prev.map((t) => {
         if (t.id === id) {
           const updated = { ...t, ...updates };
-          if (updated.start >= updated.end) return t; // reject invalid range
+          if (updated.audioSourceStart >= updated.audioSourceEnd) return t; // reject invalid range
           return updated;
         }
         return t;
       });
-      return next.sort((a, b) => a.start - b.start);
+      return next;
     });
   }, []);
 
@@ -290,23 +307,9 @@ export default function App() {
     setAudioTracks((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const handleAudioTrackTimeUpdate = useCallback(
-    (id: string, start: number, end: number) => {
-      setAudioTracks((prev) => {
-        const next = prev.map((t) => {
-          if (t.id === id) {
-            const clampedStart = Math.max(0, Math.min(start, duration));
-            const clampedEnd = Math.max(0, Math.min(end, duration));
-            if (clampedStart >= clampedEnd) return t; // reject invalid range
-            return { ...t, start: clampedStart, end: clampedEnd };
-          }
-          return t;
-        });
-        return next.sort((a, b) => a.start - b.start);
-      });
-    },
-    [duration],
-  );
+  const handleDeleteAudioTrackBySegment = useCallback((segmentId: string) => {
+    setAudioTracks((prev) => prev.filter((t) => t.segmentId !== segmentId));
+  }, []);
 
   return (
     <div
@@ -352,13 +355,6 @@ export default function App() {
                 title="Add subtitle at current time (3s duration)"
               >
                 + Subtitle
-              </button>
-              <button
-                onClick={handleAddAudio}
-                className="px-3 py-1.5 text-sm bg-amber-700 hover:bg-amber-600 rounded transition-colors"
-                title="Dub audio at current time (D)"
-              >
-                + Audio
               </button>
             </>
           )}
@@ -433,6 +429,7 @@ export default function App() {
             src={videoSrc}
             currentTime={currentTime}
             audioTracks={audioTracks}
+            segments={segments}
             onTimeUpdate={setCurrentTime}
             onDurationChange={setDuration}
             onMarkIn={handleMarkIn}
@@ -440,7 +437,6 @@ export default function App() {
             onAddSubtitle={handleAddSubtitleAtPlayhead}
             onSubtitleMarkIn={handleSubtitleMarkIn}
             onSubtitleMarkOut={handleSubtitleMarkOut}
-            onAddAudio={handleAddAudio}
           />
 
           {/* Subtitle Editor (when pending) */}
@@ -458,10 +454,8 @@ export default function App() {
             currentTime={currentTime}
             segments={segments}
             subtitles={subtitles}
-            audioTracks={audioTracks}
             onSeek={setCurrentTime}
             onSegmentUpdate={handleSegmentUpdate}
-            onAudioTrackUpdate={handleAudioTrackTimeUpdate}
           />
 
           {/* Bottom panel */}
@@ -471,8 +465,11 @@ export default function App() {
                 <h3 className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wider">Segments</h3>
                 <SegmentList
                   segments={segments}
+                  audioTracks={audioTracks}
                   onDelete={handleDeleteSegment}
                   onSeek={setCurrentTime}
+                  onAddAudio={handleAddAudio}
+                  onDeleteAudio={handleDeleteAudioTrackBySegment}
                 />
               </div>
               <div>
@@ -485,17 +482,10 @@ export default function App() {
                 />
               </div>
               <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Audio Dub</h3>
-                  <button
-                    onClick={handleAddAudio}
-                    className="px-2 py-0.5 text-[10px] bg-amber-700 hover:bg-amber-600 rounded transition-colors text-white"
-                  >
-                    + Audio
-                  </button>
-                </div>
+                <h3 className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wider">Audio Dub</h3>
                 <AudioDubPanel
                   audioTracks={audioTracks}
+                  segments={segments}
                   onUpdate={handleUpdateAudioTrack}
                   onDelete={handleDeleteAudioTrack}
                   onSeek={setCurrentTime}

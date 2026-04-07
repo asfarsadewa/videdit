@@ -70,15 +70,21 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         compress,
         quality,
         burnSubtitles: subtitleOption === 'burn',
-        audioTracks: audioTracks.map((t) => ({
-          id: t.id,
-          file_path: t.filePath,
-          start: t.start,
-          end: t.end,
-          volume: t.volume,
-          radio_effect: t.radioEffect,
-          radio_intensity: t.radioIntensity,
-        })),
+        audioTracks: audioTracks.map((t) => {
+          const segment = segments.find(s => s.id === t.segmentId)!;
+          return {
+            id: t.id,
+            segment_id: t.segmentId,
+            segment_start: segment.start,
+            segment_end: segment.end,
+            file_path: t.filePath,
+            audio_source_start: t.audioSourceStart,
+            audio_source_end: t.audioSourceEnd,
+            volume: t.volume,
+            radio_effect: t.radioEffect,
+            radio_intensity: t.radioIntensity,
+          };
+        }),
         originalRadio,
         originalRadioIntensity,
       });

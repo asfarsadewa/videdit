@@ -1,11 +1,12 @@
 import { useRef, useEffect, useCallback } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { AudioTrack } from "../types";
+import type { AudioTrack, Segment } from "../types";
 
 interface VideoPlayerProps {
   src: string | null;
   currentTime: number;
   audioTracks: AudioTrack[];
+  segments: Segment[];
   onTimeUpdate: (time: number) => void;
   onDurationChange: (duration: number) => void;
   onMarkIn: () => void;
@@ -13,13 +14,13 @@ interface VideoPlayerProps {
   onAddSubtitle: () => void;
   onSubtitleMarkIn: () => void;
   onSubtitleMarkOut: () => void;
-  onAddAudio: () => void;
 }
 
 export default function VideoPlayer({
   src,
   currentTime,
   audioTracks,
+  segments,
   onTimeUpdate,
   onDurationChange,
   onMarkIn,
@@ -27,7 +28,6 @@ export default function VideoPlayer({
   onAddSubtitle,
   onSubtitleMarkIn,
   onSubtitleMarkOut,
-  onAddAudio,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const isSeeking = useRef(false);
@@ -82,25 +82,38 @@ export default function VideoPlayer({
   const syncAudioTracks = useCallback(
     (videoTime: number, playing: boolean) => {
       for (const track of audioTracks) {
+        const segment = segments.find(s => s.id === track.segmentId);
+        if (!segment) continue;
+        
         const el = audioElsRef.current.get(track.id);
         if (!el) continue;
 
-        const inRange = videoTime >= track.start && videoTime < track.end;
-        if (inRange && playing) {
-          const targetTime = videoTime - track.start;
-          if (Math.abs(el.currentTime - targetTime) > 0.3) {
-            el.currentTime = targetTime;
+        // Audio plays only when video is within the segment's time range
+        const segmentStart = segment.start;
+        const segmentEnd = segment.end;
+        const inSegment = videoTime >= segmentStart && videoTime < segmentEnd;
+        
+        if (inSegment && playing) {
+          // Calculate position within segment
+          const positionInSegment = videoTime - segmentStart;
+          // Map to audio source time (accounting for trim)
+          const audioTime = track.audioSourceStart + positionInSegment;
+          
+          // Check if we're within the trimmed audio range
+          if (audioTime >= track.audioSourceStart && audioTime < track.audioSourceEnd) {
+            if (Math.abs(el.currentTime - audioTime) > 0.3) {
+              el.currentTime = audioTime;
+            }
+            if (el.paused) el.play().catch(() => {});
+          } else {
+            if (!el.paused) el.pause();
           }
-          if (el.paused) el.play().catch(() => {});
         } else {
           if (!el.paused) el.pause();
-          if (inRange) {
-            el.currentTime = videoTime - track.start;
-          }
         }
       }
     },
-    [audioTracks],
+    [audioTracks, segments],
   );
 
   // Sync video time when currentTime changes externally (e.g. timeline click)
@@ -202,16 +215,12 @@ export default function VideoPlayer({
           e.preventDefault();
           onAddSubtitle();
           break;
-        case "d":
-          e.preventDefault();
-          onAddAudio();
-          break;
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [src, onMarkIn, onMarkOut, onAddSubtitle, onSubtitleMarkIn, onSubtitleMarkOut, onAddAudio]);
+  }, [src, onMarkIn, onMarkOut, onAddSubtitle, onSubtitleMarkIn, onSubtitleMarkOut]);
 
   if (!src) {
     return null;
