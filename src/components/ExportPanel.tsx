@@ -74,15 +74,15 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
           const segment = segments.find(s => s.id === t.segmentId)!;
           return {
             id: t.id,
-            segment_id: t.segmentId,
-            segment_start: segment.start,
-            segment_end: segment.end,
-            file_path: t.filePath,
-            audio_source_start: t.audioSourceStart,
-            audio_source_end: t.audioSourceEnd,
+            segmentId: t.segmentId,
+            segmentStart: segment.start,
+            segmentEnd: segment.end,
+            filePath: t.filePath,
+            audioSourceStart: t.audioSourceStart,
+            audioSourceEnd: t.audioSourceEnd,
             volume: t.volume,
-            radio_effect: t.radioEffect,
-            radio_intensity: t.radioIntensity,
+            radioEffect: t.radioEffect,
+            radioIntensity: t.radioIntensity,
           };
         }),
         originalRadio,

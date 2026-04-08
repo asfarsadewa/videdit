@@ -29,10 +29,13 @@ pub struct Subtitle {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioTrack {
     pub id: String,
     pub segment_id: String,
+    #[serde(default)]
     pub segment_start: f64,
+    #[serde(default)]
     pub segment_end: f64,
     pub file_path: String,
     pub audio_source_start: f64,
@@ -623,7 +626,7 @@ fn build_audio_filter_cmd(
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
-    let seg_end = seg_start + seg_duration;
+    let _seg_end = seg_start + seg_duration;
 
     if original_radio && input_has_audio {
         let (low_cut, high_cut, noise_amp, ratio) = radio_params(original_radio_intensity);

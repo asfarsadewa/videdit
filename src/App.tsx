@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -31,6 +31,11 @@ export default function App() {
   const [pendingSubtitle, setPendingSubtitle] = useState<Subtitle | null>(null);
   const [subtitleMarkIn, setSubtitleMarkIn] = useState<number | null>(null);
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
+  const [micDevices, setMicDevices] = useState<{ id: string; name: string; isDefault: boolean }[]>([]);
+  const [isMicRecording, setIsMicRecording] = useState(false);
+  const [recordingSegmentId, setRecordingSegmentId] = useState<string | null>(null);
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
 
   const loadVideo = useCallback(async (path: string) => {
     setLoading(true);
@@ -311,6 +316,89 @@ export default function App() {
     setAudioTracks((prev) => prev.filter((t) => t.segmentId !== segmentId));
   }, []);
 
+  // Load mic devices on mount
+  useEffect(() => {
+    invoke<Array<{ id: string; name: string; isDefault: boolean }>>("enumerate_mic_devices")
+      .then((devices) => setMicDevices(devices))
+      .catch((e) => console.warn("Failed to enumerate mic devices:", e));
+  }, []);
+
+  // Listen for mic recording events
+  useEffect(() => {
+    const unlistenStarted = listen<string>("mic-recording-started", (_event) => {
+      setIsMicRecording(true);
+      setRecordingSegmentId(_event.payload);
+    });
+    const unlistenStopped = listen<{ segmentId: string; filePath: string; duration: number; deviceName: string }>("mic-recording-stopped", async (_event) => {
+      setIsMicRecording(false);
+
+      const result = _event.payload;
+
+      try {
+        const currentSegments = segmentsRef.current;
+        const segment = currentSegments.find(s => s.id === result.segmentId);
+        if (!segment) {
+          console.warn("Mic recording stopped but segment not found:", result.segmentId);
+          return;
+        }
+
+        const fileName = result.filePath.split("\\").pop()?.split("/").pop() ?? "mic-recording.wav";
+        const segmentDuration = segment.end - segment.start;
+        const audioEnd = Math.min(result.duration, segmentDuration);
+
+        const newTrack: AudioTrack = {
+          id: generateId(),
+          segmentId: result.segmentId,
+          filePath: result.filePath,
+          fileName: `🎤 ${fileName}`,
+          duration: result.duration,
+          audioSourceStart: 0,
+          audioSourceEnd: audioEnd > 0 ? audioEnd : result.duration,
+          volume: 1.0,
+          radioEffect: false,
+          radioIntensity: 0,
+        };
+
+        setAudioTracks((prev) => {
+          const filtered = prev.filter(t => t.segmentId !== result.segmentId);
+          return [...filtered, newTrack];
+        });
+      } catch (e) {
+        setError(String(e));
+      }
+
+      setRecordingSegmentId(null);
+    });
+    return () => {
+      unlistenStarted.then((fn) => fn());
+      unlistenStopped.then((fn) => fn());
+    };
+  }, []);
+
+  const handleRecordAudio = useCallback(async (segmentId: string, deviceId: string, durationSecs: number) => {
+    if (isMicRecording) return;
+
+    try {
+      await invoke("start_mic_recording", {
+        segmentId,
+        deviceId,
+        maxDurationSecs: durationSecs,
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [isMicRecording]);
+
+  const handleStopMicRecording = useCallback(async () => {
+    if (!isMicRecording) return;
+
+    try {
+      await invoke("stop_mic_recording");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [isMicRecording]);
+
   return (
     <div
       className="flex flex-col h-screen bg-zinc-900 text-zinc-100 overflow-hidden"
@@ -470,6 +558,11 @@ export default function App() {
                   onSeek={setCurrentTime}
                   onAddAudio={handleAddAudio}
                   onDeleteAudio={handleDeleteAudioTrackBySegment}
+                  onRecordAudio={handleRecordAudio}
+                  onStopRecording={handleStopMicRecording}
+                  micDevices={micDevices}
+                  isRecording={isMicRecording}
+                  recordingSegmentId={recordingSegmentId}
                 />
               </div>
               <div>
