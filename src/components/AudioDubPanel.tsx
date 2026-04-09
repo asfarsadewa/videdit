@@ -60,14 +60,14 @@ export default function AudioDubPanel({
               <span className="text-[10px] text-zinc-600 w-6">Trim</span>
               <button
                 className="text-zinc-400 hover:text-white font-mono text-[10px]"
-                onClick={() => onSeek(segment.start + track.audioSourceStart)}
+                onClick={() => onSeek(segment.start)}
               >
                 {formatTime(track.audioSourceStart)}
               </button>
               <span className="text-zinc-700">→</span>
               <button
                 className="text-zinc-400 hover:text-white font-mono text-[10px]"
-                onClick={() => onSeek(segment.start + track.audioSourceEnd)}
+                onClick={() => onSeek(segment.start + (track.audioSourceEnd - track.audioSourceStart))}
               >
                 {formatTime(track.audioSourceEnd)}
               </button>

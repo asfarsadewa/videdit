@@ -53,14 +53,19 @@ export default function VideoPlayer({
       }
     }
 
-    // Add new tracks or update volume on existing ones
+    // Add new tracks or update existing ones
     for (const track of audioTracks) {
+      const expectedSrc = convertFileSrc(track.filePath);
       let el = els.get(track.id);
       if (!el) {
         el = new Audio();
-        el.src = convertFileSrc(track.filePath);
+        el.src = expectedSrc;
         el.preload = "auto";
         els.set(track.id, el);
+      } else if (el.src !== expectedSrc) {
+        el.pause();
+        el.src = expectedSrc;
+        el.load();
       }
       el.volume = Math.min(track.volume, 1.0);
     }

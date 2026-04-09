@@ -171,11 +171,15 @@ fn mic_capture_loop(
     let channels = mix_format.get_nchannels();
     let sample_rate = mix_format.get_samplespersec();
 
-    // Determine WAV spec based on the WASAPI format
     let (bits_per_sample, wav_sample_format) = match sample_type {
         SampleType::Float => (32u16, hound::SampleFormat::Float),
-        SampleType::Int => (16u16, hound::SampleFormat::Int),
+        SampleType::Int => {
+            let bps = ((block_align / channels as usize) * 8) as u16;
+            (bps, hound::SampleFormat::Int)
+        }
     };
+
+    log::info!("Mic WAV spec: {} bits/sample, {:?}", bits_per_sample, wav_sample_format);
 
     let spec = hound::WavSpec {
         channels,
@@ -226,7 +230,7 @@ fn mic_capture_loop(
                 Ok((n_frames, _info)) => {
                     if n_frames > 0 {
                         let byte_count = n_frames as usize * block_align;
-                        write_samples(&mut writer, &data_buf[..byte_count], &sample_type);
+                        write_samples(&mut writer, &data_buf[..byte_count], &sample_type, bits_per_sample);
                     }
                 }
                 Err(e) => {
@@ -338,11 +342,15 @@ fn capture_loop(stop_flag: Arc<AtomicBool>, output_path: PathBuf) -> Result<(), 
     let channels = mix_format.get_nchannels();
     let sample_rate = mix_format.get_samplespersec();
 
-    // Determine WAV spec based on the WASAPI format
     let (bits_per_sample, wav_sample_format) = match sample_type {
         SampleType::Float => (32u16, hound::SampleFormat::Float),
-        SampleType::Int => (16u16, hound::SampleFormat::Int),
+        SampleType::Int => {
+            let bps = ((block_align / channels as usize) * 8) as u16;
+            (bps, hound::SampleFormat::Int)
+        }
     };
+
+    log::info!("Loopback WAV spec: {} bits/sample, {:?}", bits_per_sample, wav_sample_format);
 
     let spec = hound::WavSpec {
         channels,
@@ -393,7 +401,7 @@ fn capture_loop(stop_flag: Arc<AtomicBool>, output_path: PathBuf) -> Result<(), 
                 Ok((n_frames, _info)) => {
                     if n_frames > 0 {
                         let byte_count = n_frames as usize * block_align;
-                        write_samples(&mut writer, &data_buf[..byte_count], &sample_type);
+                        write_samples(&mut writer, &data_buf[..byte_count], &sample_type, bits_per_sample);
                     }
                 }
                 Err(e) => {
@@ -415,6 +423,7 @@ fn write_samples(
     writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     raw_bytes: &[u8],
     sample_type: &SampleType,
+    bits_per_sample: u16,
 ) {
     match sample_type {
         SampleType::Float => {
@@ -424,9 +433,24 @@ fn write_samples(
             }
         }
         SampleType::Int => {
-            for chunk in raw_bytes.chunks_exact(2) {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                writer.write_sample(sample).ok();
+            let bytes_per_sample = (bits_per_sample / 8) as usize;
+            for chunk in raw_bytes.chunks_exact(bytes_per_sample) {
+                match bytes_per_sample {
+                    2 => {
+                        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                        writer.write_sample(sample).ok();
+                    }
+                    3 => {
+                        let sign_ext = if chunk[2] & 0x80 != 0 { 0xFF } else { 0x00 };
+                        let sample = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], sign_ext]);
+                        writer.write_sample(sample).ok();
+                    }
+                    4 => {
+                        let sample = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        writer.write_sample(sample).ok();
+                    }
+                    _ => {}
+                }
             }
         }
     }

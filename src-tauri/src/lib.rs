@@ -152,18 +152,25 @@ fn start_mic_recording(
     let output_path = handle.output_path.clone();
     let start_time = std::time::Instant::now();
 
-    // Spawn a thread to auto-stop at max_duration
     let stop_flag = handle.stop_flag();
     let segment_id_clone = segment_id.clone();
     let app_clone = app.clone();
     let output_path_clone = output_path.clone();
     let device_name_clone = device_name.clone();
+
+    // Persist state BEFORE spawning the auto-stop thread
+    mic_state.start_time = Some(start_time);
+    mic_state.segment_id = Some(segment_id.clone());
+    mic_state.handle = Some(handle);
+    mic_state.output_path = Some(output_path);
+    mic_state.device_name = device_name;
+    drop(mic_state);
+
+    let mic_state_arc = state.inner().clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs_f64(max_duration_secs));
-        // Only auto-stop if recording is still running (flag is false)
         if !stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
             stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            // Give the capture thread time to finalize the WAV
             std::thread::sleep(std::time::Duration::from_millis(300));
 
             let duration_secs = get_wav_duration(&output_path_clone).unwrap_or(max_duration_secs);
@@ -176,14 +183,16 @@ fn start_mic_recording(
                 device_name: device_name_clone.unwrap_or_else(|| "Unknown".to_string()),
             };
             let _ = app_clone.emit("mic-recording-stopped", &result);
+
+            if let Ok(mut mic_state) = mic_state_arc.lock() {
+                mic_state.handle = None;
+                mic_state.start_time = None;
+                mic_state.segment_id = None;
+                mic_state.output_path = None;
+                mic_state.device_name = None;
+            }
         }
     });
-
-    mic_state.start_time = Some(start_time);
-    mic_state.segment_id = Some(segment_id.clone());
-    mic_state.handle = Some(handle);
-    mic_state.output_path = Some(output_path);
-    mic_state.device_name = device_name;
 
     let _ = app.emit("mic-recording-started", &segment_id);
 
