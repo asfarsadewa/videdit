@@ -22,6 +22,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
   const [originalRadioIntensity, setOriginalRadioIntensity] = useState(30);
   const [vhsEffect, setVhsEffect] = useState(false);
   const [vhsIntensity, setVhsIntensity] = useState(40);
+  const [vhsScanlines, setVhsScanlines] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +92,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         originalRadioIntensity,
         vhsEffect,
         vhsIntensity,
+        vhsScanlines,
       });
 
       // Clean up temp recording file after successful export
@@ -103,7 +105,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, isFromRecording]);
+  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, vhsScanlines, isFromRecording]);
 
   const isDisabled =
     (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
@@ -210,17 +212,28 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
           VHS/CRT effect
         </label>
         {vhsEffect && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-600">Light</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={vhsIntensity}
-              onChange={(e) => setVhsIntensity(Number(e.target.value))}
-              className="w-28 accent-fuchsia-500"
-            />
-            <span className="text-xs text-zinc-600">Damaged</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-600">Light</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={vhsIntensity}
+                onChange={(e) => setVhsIntensity(Number(e.target.value))}
+                className="w-28 accent-fuchsia-500"
+              />
+              <span className="text-xs text-zinc-600">Damaged</span>
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={vhsScanlines}
+                onChange={(e) => setVhsScanlines(e.target.checked)}
+                className="accent-fuchsia-500"
+              />
+              Scanlines
+            </label>
           </div>
         )}
       </div>
@@ -262,7 +275,9 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
       {/* Keyframe notice */}
       <p className="text-xs text-zinc-600">
         {vhsEffect
-          ? "VHS/CRT export re-encodes video into stretched 4:3 with analog blur, bleed, noise, and scanlines."
+          ? vhsScanlines
+            ? "VHS/CRT export re-encodes video into stretched 4:3 with analog blur, bleed, noise, and scanlines."
+            : "VHS/CRT export re-encodes video into stretched 4:3 with soft tube blur, bleed, wash, and tracking distortion."
           : compress
           ? "Re-encoded export — frame-accurate cuts."
           : audioTracks.length > 0 || originalRadio

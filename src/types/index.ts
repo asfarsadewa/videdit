@@ -22,6 +22,7 @@ export interface ExportOptions {
   quality: number;
   vhsEffect: boolean;
   vhsIntensity: number;
+  vhsScanlines: boolean;
 }
 
 export interface RecordingStartedPayload {

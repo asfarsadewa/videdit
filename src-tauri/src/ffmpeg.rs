@@ -249,6 +249,7 @@ pub fn export_segments(
     original_radio_intensity: u32,
     vhs_effect: bool,
     vhs_intensity: u32,
+    vhs_scanlines: bool,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
@@ -340,6 +341,7 @@ pub fn export_segments(
                 input_has_audio,
                 vhs_effect,
                 vhs_intensity,
+                vhs_scanlines,
             );
         } else if merge {
             // When merging segments, always re-encode to a consistent profile
@@ -630,6 +632,7 @@ fn build_export_filter_cmd(
     input_has_audio: bool,
     vhs_effect: bool,
     vhs_intensity: u32,
+    vhs_scanlines: bool,
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
@@ -703,12 +706,12 @@ fn build_export_filter_cmd(
         let srt_escaped = escape_path_for_filter(srt);
         if vhs_effect {
             filters.push(format!("[0:v]subtitles='{srt_escaped}'[vsub]"));
-            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity));
+            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity, vhs_scanlines));
         } else {
             filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
         }
     } else if vhs_effect {
-        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity));
+        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity, vhs_scanlines));
     }
 
     let filter_complex = filters.join(";");
@@ -782,37 +785,72 @@ fn vhs_params(intensity: u32) -> VhsParams {
     }
 }
 
-fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32) -> String {
+fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32, scanlines: bool) -> String {
     let p = vhs_params(intensity);
     let chroma_shift = p.chroma_shift;
     let rgb_shift = p.rgb_shift;
 
-    format!(
-        "{input_label}\
-         scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1,\
-         boxblur=luma_radius={blur:.2}:luma_power=1:chroma_radius={chroma_blur:.2}:chroma_power=1,\
-         chromashift=cbh={chroma_shift}:crh={neg_chroma_shift}:edge=smear,\
-         rgbashift=rh={rgb_shift}:bh={neg_rgb_shift}:edge=smear,\
-         tblend=all_mode=average:all_opacity={ghost:.2},\
-         noise=alls={noise}:allf=t+u,\
-         eq=contrast={contrast:.2}:brightness={brightness:.3}:saturation={saturation:.2}:gamma={gamma:.2},\
-         drawgrid=w=iw:h=2:t=1:c=black@{scanlines:.2},\
-         drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
-         vignette=angle=PI/5,format=yuv420p{output_label}",
-        blur = p.blur_radius,
-        chroma_blur = p.blur_radius + 0.40,
-        neg_chroma_shift = -chroma_shift,
-        neg_rgb_shift = -rgb_shift,
-        ghost = p.ghost_opacity,
-        noise = p.noise_strength,
-        contrast = p.contrast,
-        brightness = p.brightness,
-        saturation = p.saturation,
-        gamma = p.gamma,
-        scanlines = p.scanline_alpha,
-        tracking = p.tracking_alpha,
-        track_height = p.tracking_height,
-    )
+    if scanlines {
+        format!(
+            "{input_label}\
+             scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1,\
+             boxblur=luma_radius={blur:.2}:luma_power=1:chroma_radius={chroma_blur:.2}:chroma_power=1,\
+             chromashift=cbh={chroma_shift}:crh={neg_chroma_shift}:edge=smear,\
+             rgbashift=rh={rgb_shift}:bh={neg_rgb_shift}:edge=smear,\
+             tblend=all_mode=average:all_opacity={ghost:.2},\
+             noise=alls={noise}:allf=t+u,\
+             eq=contrast={contrast:.2}:brightness={brightness:.3}:saturation={saturation:.2}:gamma={gamma:.2},\
+             drawgrid=w=iw:h=2:t=1:c=black@{scanlines:.2},\
+             drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
+             vignette=angle=PI/5,format=yuv420p{output_label}",
+            blur = p.blur_radius,
+            chroma_blur = p.blur_radius + 0.40,
+            neg_chroma_shift = -chroma_shift,
+            neg_rgb_shift = -rgb_shift,
+            ghost = p.ghost_opacity,
+            noise = p.noise_strength,
+            contrast = p.contrast,
+            brightness = p.brightness,
+            saturation = p.saturation,
+            gamma = p.gamma,
+            scanlines = p.scanline_alpha,
+            tracking = p.tracking_alpha,
+            track_height = p.tracking_height,
+        )
+    } else {
+        format!(
+            "{input_label}\
+             scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1,\
+             eq=contrast={pre_contrast:.2}:brightness={pre_brightness:.3}:saturation={pre_saturation:.2}:gamma={pre_gamma:.2},\
+             hue=h=-8:s={hue_saturation:.2},\
+             boxblur=luma_radius={soft_blur:.2}:luma_power=1:chroma_radius={soft_chroma_blur:.2}:chroma_power=1,\
+             chromashift=cbh={chroma_shift}:crh={neg_chroma_shift}:cbv=1:crv=-1:edge=smear,\
+             lagfun=decay={lag_decay:.2},\
+             noise=alls={soft_noise}:allf=t:all_seed=37,\
+             drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
+             format=rgba,rgbashift=rh={rgb_shift}:bh={neg_rgb_shift}:rv=1:bv=-1:edge=smear,\
+             boxblur=luma_radius=0.80:luma_power=1:chroma_radius=0.80:chroma_power=1,\
+             eq=contrast={post_contrast:.2}:brightness={post_brightness:.3}:saturation={post_saturation:.2}:gamma={post_gamma:.2},\
+             vignette=angle=PI/4,format=yuv420p{output_label}",
+            pre_contrast = 0.94 - p.ghost_opacity * 0.20,
+            pre_brightness = 0.018 + p.tracking_alpha * 0.04,
+            pre_saturation = 0.72 - p.ghost_opacity * 0.35,
+            pre_gamma = 1.10 + p.ghost_opacity * 0.35,
+            hue_saturation = 0.82 - p.ghost_opacity * 0.30,
+            soft_blur = p.blur_radius + 1.00,
+            soft_chroma_blur = p.blur_radius + 1.45,
+            neg_chroma_shift = -chroma_shift,
+            lag_decay = 0.88 + p.ghost_opacity * 0.20,
+            soft_noise = (2 + p.noise_strength / 4).min(8),
+            tracking = p.tracking_alpha,
+            track_height = p.tracking_height,
+            neg_rgb_shift = -rgb_shift,
+            post_contrast = 0.88 - p.ghost_opacity * 0.18,
+            post_brightness = 0.010 + p.tracking_alpha * 0.03,
+            post_saturation = 0.68 - p.ghost_opacity * 0.25,
+            post_gamma = 1.08 + p.ghost_opacity * 0.24,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -841,7 +879,7 @@ mod tests {
 
     #[test]
     fn vhs_filter_chain_contains_crt_export_steps() {
-        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40);
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, true);
 
         assert!(chain.starts_with("[0:v]scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1"));
         assert!(chain.contains("boxblur="));
@@ -852,6 +890,21 @@ mod tests {
         assert!(chain.contains("eq=contrast="));
         assert!(chain.contains("drawgrid=w=iw:h=2:t=1"));
         assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*47,ih))'"));
+        assert!(chain.ends_with("format=yuv420p[vout]"));
+    }
+
+    #[test]
+    fn vhs_filter_chain_can_omit_scanlines_but_keep_distortion() {
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, false);
+
+        assert!(chain.starts_with("[0:v]scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1"));
+        assert!(!chain.contains("drawgrid="));
+        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*47,ih))'"));
+        assert!(chain.contains("lagfun=decay="));
+        assert!(chain.contains("chromashift="));
+        assert!(chain.contains("rgbashift="));
+        assert!(chain.contains("boxblur="));
+        assert!(chain.contains("noise=alls="));
         assert!(chain.ends_with("format=yuv420p[vout]"));
     }
 }

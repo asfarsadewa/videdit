@@ -60,6 +60,7 @@ fn export_video(
     original_radio_intensity: u32,
     vhs_effect: bool,
     vhs_intensity: u32,
+    vhs_scanlines: bool,
 ) -> Result<String, String> {
     for (i, sub) in subtitles.iter().enumerate() {
         if sub.start < 0.0 {
@@ -91,6 +92,7 @@ fn export_video(
         original_radio_intensity,
         vhs_effect,
         vhs_intensity,
+        vhs_scanlines,
     )
 }
 
