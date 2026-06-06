@@ -20,6 +20,8 @@ export interface ExportOptions {
   merge: boolean;
   compress: boolean;
   quality: number;
+  vhsEffect: boolean;
+  vhsIntensity: number;
 }
 
 export interface RecordingStartedPayload {

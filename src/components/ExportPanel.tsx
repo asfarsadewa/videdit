@@ -20,6 +20,8 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
   const [subtitleOption, setSubtitleOption] = useState<'none' | 'srt' | 'burn'>('none');
   const [originalRadio, setOriginalRadio] = useState(false);
   const [originalRadioIntensity, setOriginalRadioIntensity] = useState(30);
+  const [vhsEffect, setVhsEffect] = useState(false);
+  const [vhsIntensity, setVhsIntensity] = useState(40);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,6 +89,8 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         }),
         originalRadio,
         originalRadioIntensity,
+        vhsEffect,
+        vhsIntensity,
       });
 
       // Clean up temp recording file after successful export
@@ -99,7 +103,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, isFromRecording]);
+  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, isFromRecording]);
 
   const isDisabled =
     (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
@@ -194,6 +198,33 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         </div>
       )}
 
+      {/* VHS/CRT video effect */}
+      <div className="flex items-center gap-4">
+        <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={vhsEffect}
+            onChange={(e) => setVhsEffect(e.target.checked)}
+            className="accent-fuchsia-500"
+          />
+          VHS/CRT effect
+        </label>
+        {vhsEffect && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-600">Light</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={vhsIntensity}
+              onChange={(e) => setVhsIntensity(Number(e.target.value))}
+              className="w-28 accent-fuchsia-500"
+            />
+            <span className="text-xs text-zinc-600">Damaged</span>
+          </div>
+        )}
+      </div>
+
       {/* Original audio radio effect */}
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
@@ -230,7 +261,9 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
 
       {/* Keyframe notice */}
       <p className="text-xs text-zinc-600">
-        {compress
+        {vhsEffect
+          ? "VHS/CRT export re-encodes video into stretched 4:3 with analog blur, bleed, noise, and scanlines."
+          : compress
           ? "Re-encoded export — frame-accurate cuts."
           : audioTracks.length > 0 || originalRadio
             ? "Video copied losslessly, audio re-encoded for mixing."

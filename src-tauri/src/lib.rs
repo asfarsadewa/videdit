@@ -58,6 +58,8 @@ fn export_video(
     audio_tracks: Vec<AudioTrack>,
     original_radio: bool,
     original_radio_intensity: u32,
+    vhs_effect: bool,
+    vhs_intensity: u32,
 ) -> Result<String, String> {
     for (i, sub) in subtitles.iter().enumerate() {
         if sub.start < 0.0 {
@@ -87,6 +89,8 @@ fn export_video(
         &audio_tracks,
         original_radio,
         original_radio_intensity,
+        vhs_effect,
+        vhs_intensity,
     )
 }
 

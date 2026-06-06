@@ -247,6 +247,8 @@ pub fn export_segments(
     audio_tracks: &[AudioTrack],
     original_radio: bool,
     original_radio_intensity: u32,
+    vhs_effect: bool,
+    vhs_intensity: u32,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
@@ -309,6 +311,7 @@ pub fn export_segments(
         let input_has_audio = has_audio_stream(app, input_path);
         let effective_original_radio = original_radio && input_has_audio;
         let effective_has_audio_processing = !overlapping_audio.is_empty() || effective_original_radio;
+        let effective_has_video_processing = seg_srt.is_some() || vhs_effect;
 
         let mut cmd = Command::new(&ffmpeg);
         cmd.args(["-y", "-ss", &format!("{:.3}", seg.start), "-i", input_path]);
@@ -322,8 +325,8 @@ pub fn export_segments(
             cmd.args(["-i", &audio.file_path]);
         }
 
-        if effective_has_audio_processing {
-            build_audio_filter_cmd(
+        if effective_has_audio_processing || effective_has_video_processing {
+            build_export_filter_cmd(
                 &mut cmd,
                 &overlapping_audio,
                 effective_original_radio,
@@ -335,6 +338,8 @@ pub fn export_segments(
                 quality,
                 merge,
                 input_has_audio,
+                vhs_effect,
+                vhs_intensity,
             );
         } else if merge {
             // When merging segments, always re-encode to a consistent profile
@@ -609,24 +614,25 @@ fn has_audio_stream(app: &AppHandle, path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the FFmpeg filter_complex args for audio mixing + optional radio effect.
-/// Handles both subtitle burning and audio overlay in a single filter graph.
-fn build_audio_filter_cmd(
+/// Build the FFmpeg filter_complex args for video effects, subtitle burning,
+/// audio mixing, and optional radio effects.
+fn build_export_filter_cmd(
     cmd: &mut Command,
     overlapping_audio: &[&AudioTrack],
     original_radio: bool,
     original_radio_intensity: u32,
-    seg_start: f64,
+    _seg_start: f64,
     seg_duration: f64,
     seg_srt: Option<&Path>,
     compress: bool,
     quality: u32,
     merge: bool,
     input_has_audio: bool,
+    vhs_effect: bool,
+    vhs_intensity: u32,
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
-    let _seg_end = seg_start + seg_duration;
 
     if original_radio && input_has_audio {
         let (low_cut, high_cut, noise_amp, ratio) = radio_params(original_radio_intensity);
@@ -692,14 +698,21 @@ fn build_audio_filter_cmd(
     let has_aout = !audio_labels.is_empty()
         && (audio_labels.len() > 1 || audio_labels[0] != "[0:a]");
 
-    let has_vfilter = seg_srt.is_some();
+    let has_vfilter = seg_srt.is_some() || vhs_effect;
     if let Some(srt) = seg_srt {
         let srt_escaped = escape_path_for_filter(srt);
-        filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
+        if vhs_effect {
+            filters.push(format!("[0:v]subtitles='{srt_escaped}'[vsub]"));
+            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity));
+        } else {
+            filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
+        }
+    } else if vhs_effect {
+        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity));
     }
 
     let filter_complex = filters.join(";");
-    log::info!("Audio filter_complex: {}", filter_complex);
+    log::info!("Export filter_complex: {}", filter_complex);
     cmd.args(["-filter_complex", &filter_complex]);
 
     if has_vfilter {
@@ -717,12 +730,130 @@ fn build_audio_filter_cmd(
     cmd.args(["-t", &format!("{seg_duration:.3}")]);
 
     if merge || compress || has_vfilter {
-        let crf = if compress || merge { quality.to_string() } else { "18".into() };
+        let crf = if vhs_effect {
+            if compress {
+                quality.to_string()
+            } else {
+                "18".into()
+            }
+        } else if compress || merge {
+            quality.to_string()
+        } else {
+            "18".into()
+        };
         cmd.args(["-c:v", "libx264", "-preset", "medium", "-crf", &crf]);
     } else {
         cmd.args(["-c:v", "copy"]);
     }
     cmd.args(["-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero"]);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VhsParams {
+    blur_radius: f64,
+    chroma_shift: i32,
+    rgb_shift: i32,
+    ghost_opacity: f64,
+    noise_strength: u32,
+    contrast: f64,
+    brightness: f64,
+    saturation: f64,
+    gamma: f64,
+    scanline_alpha: f64,
+    tracking_alpha: f64,
+    tracking_height: u32,
+}
+
+fn vhs_params(intensity: u32) -> VhsParams {
+    let t = intensity.min(100) as f64 / 100.0;
+    VhsParams {
+        blur_radius: 0.35 + t * 1.10,
+        chroma_shift: (1.0 + t * 5.0).round() as i32,
+        rgb_shift: (1.0 + t * 3.0).round() as i32,
+        ghost_opacity: 0.10 + t * 0.22,
+        noise_strength: (5.0 + t * 20.0).round() as u32,
+        contrast: 1.08 - t * 0.20,
+        brightness: -0.010 - t * 0.025,
+        saturation: 0.88 - t * 0.28,
+        gamma: 1.02 + t * 0.08,
+        scanline_alpha: 0.08 + t * 0.16,
+        tracking_alpha: 0.05 + t * 0.13,
+        tracking_height: (2.0 + t * 8.0).round() as u32,
+    }
+}
+
+fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32) -> String {
+    let p = vhs_params(intensity);
+    let chroma_shift = p.chroma_shift;
+    let rgb_shift = p.rgb_shift;
+
+    format!(
+        "{input_label}\
+         scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1,\
+         boxblur=luma_radius={blur:.2}:luma_power=1:chroma_radius={chroma_blur:.2}:chroma_power=1,\
+         chromashift=cbh={chroma_shift}:crh={neg_chroma_shift}:edge=smear,\
+         rgbashift=rh={rgb_shift}:bh={neg_rgb_shift}:edge=smear,\
+         tblend=all_mode=average:all_opacity={ghost:.2},\
+         noise=alls={noise}:allf=t+u,\
+         eq=contrast={contrast:.2}:brightness={brightness:.3}:saturation={saturation:.2}:gamma={gamma:.2},\
+         drawgrid=w=iw:h=2:t=1:c=black@{scanlines:.2},\
+         drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
+         vignette=angle=PI/5,format=yuv420p{output_label}",
+        blur = p.blur_radius,
+        chroma_blur = p.blur_radius + 0.40,
+        neg_chroma_shift = -chroma_shift,
+        neg_rgb_shift = -rgb_shift,
+        ghost = p.ghost_opacity,
+        noise = p.noise_strength,
+        contrast = p.contrast,
+        brightness = p.brightness,
+        saturation = p.saturation,
+        gamma = p.gamma,
+        scanlines = p.scanline_alpha,
+        tracking = p.tracking_alpha,
+        track_height = p.tracking_height,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_vhs_filter_chain, vhs_params};
+
+    #[test]
+    fn vhs_params_clamp_intensity_to_100() {
+        assert_eq!(vhs_params(100), vhs_params(250));
+    }
+
+    #[test]
+    fn vhs_params_increase_damage_with_intensity() {
+        let light = vhs_params(0);
+        let damaged = vhs_params(100);
+
+        assert!(damaged.blur_radius > light.blur_radius);
+        assert!(damaged.chroma_shift > light.chroma_shift);
+        assert!(damaged.rgb_shift > light.rgb_shift);
+        assert!(damaged.ghost_opacity > light.ghost_opacity);
+        assert!(damaged.noise_strength > light.noise_strength);
+        assert!(damaged.scanline_alpha > light.scanline_alpha);
+        assert!(damaged.tracking_height > light.tracking_height);
+        assert!(damaged.saturation < light.saturation);
+    }
+
+    #[test]
+    fn vhs_filter_chain_contains_crt_export_steps() {
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40);
+
+        assert!(chain.starts_with("[0:v]scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1"));
+        assert!(chain.contains("boxblur="));
+        assert!(chain.contains("chromashift="));
+        assert!(chain.contains("rgbashift="));
+        assert!(chain.contains("tblend=all_mode=average"));
+        assert!(chain.contains("noise=alls="));
+        assert!(chain.contains("eq=contrast="));
+        assert!(chain.contains("drawgrid=w=iw:h=2:t=1"));
+        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*47,ih))'"));
+        assert!(chain.ends_with("format=yuv420p[vout]"));
+    }
 }
 
 fn parse_ffmpeg_time(line: &str) -> Option<f64> {
