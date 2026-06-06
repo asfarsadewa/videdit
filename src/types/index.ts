@@ -23,6 +23,7 @@ export interface ExportOptions {
   vhsEffect: boolean;
   vhsIntensity: number;
   vhsScanlines: boolean;
+  vhsColorProfile: 'faded' | 'preserved';
 }
 
 export interface RecordingStartedPayload {

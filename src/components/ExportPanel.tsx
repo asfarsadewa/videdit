@@ -23,6 +23,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
   const [vhsEffect, setVhsEffect] = useState(false);
   const [vhsIntensity, setVhsIntensity] = useState(40);
   const [vhsScanlines, setVhsScanlines] = useState(true);
+  const [vhsColorProfile, setVhsColorProfile] = useState<'faded' | 'preserved'>('faded');
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +94,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         vhsEffect,
         vhsIntensity,
         vhsScanlines,
+        vhsColorProfile,
       });
 
       // Clean up temp recording file after successful export
@@ -105,7 +107,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, vhsScanlines, isFromRecording]);
+  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, vhsScanlines, vhsColorProfile, isFromRecording]);
 
   const isDisabled =
     (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
@@ -212,7 +214,7 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
           VHS/CRT effect
         </label>
         {vhsEffect && (
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <span className="text-xs text-zinc-600">Light</span>
               <input
@@ -234,6 +236,31 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
               />
               Scanlines
             </label>
+            {!vhsScanlines && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-600">Colour</span>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="vhsColorProfile"
+                    checked={vhsColorProfile === 'faded'}
+                    onChange={() => setVhsColorProfile('faded')}
+                    className="accent-fuchsia-500"
+                  />
+                  Faded
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="vhsColorProfile"
+                    checked={vhsColorProfile === 'preserved'}
+                    onChange={() => setVhsColorProfile('preserved')}
+                    className="accent-fuchsia-500"
+                  />
+                  Preserved
+                </label>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -277,7 +304,9 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         {vhsEffect
           ? vhsScanlines
             ? "VHS/CRT export re-encodes video into stretched 4:3 with analog blur, bleed, noise, and scanlines."
-            : "VHS/CRT export re-encodes video into stretched 4:3 with soft tube blur, bleed, wash, and tracking distortion."
+            : vhsColorProfile === 'preserved'
+              ? "VHS/CRT export re-encodes video into stretched 4:3 with soft tube blur, bleed, preserved colour, and tracking distortion."
+              : "VHS/CRT export re-encodes video into stretched 4:3 with soft tube blur, bleed, wash, and tracking distortion."
           : compress
           ? "Re-encoded export — frame-accurate cuts."
           : audioTracks.length > 0 || originalRadio

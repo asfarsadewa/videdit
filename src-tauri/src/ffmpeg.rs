@@ -250,6 +250,7 @@ pub fn export_segments(
     vhs_effect: bool,
     vhs_intensity: u32,
     vhs_scanlines: bool,
+    vhs_color_profile: &str,
 ) -> Result<String, String> {
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
@@ -342,6 +343,7 @@ pub fn export_segments(
                 vhs_effect,
                 vhs_intensity,
                 vhs_scanlines,
+                vhs_color_profile,
             );
         } else if merge {
             // When merging segments, always re-encode to a consistent profile
@@ -633,6 +635,7 @@ fn build_export_filter_cmd(
     vhs_effect: bool,
     vhs_intensity: u32,
     vhs_scanlines: bool,
+    vhs_color_profile: &str,
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
@@ -702,16 +705,17 @@ fn build_export_filter_cmd(
         && (audio_labels.len() > 1 || audio_labels[0] != "[0:a]");
 
     let has_vfilter = seg_srt.is_some() || vhs_effect;
+    let color_profile = parse_vhs_color_profile(vhs_color_profile);
     if let Some(srt) = seg_srt {
         let srt_escaped = escape_path_for_filter(srt);
         if vhs_effect {
             filters.push(format!("[0:v]subtitles='{srt_escaped}'[vsub]"));
-            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity, vhs_scanlines));
+            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity, vhs_scanlines, color_profile));
         } else {
             filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
         }
     } else if vhs_effect {
-        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity, vhs_scanlines));
+        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity, vhs_scanlines, color_profile));
     }
 
     let filter_complex = filters.join(";");
@@ -767,6 +771,59 @@ struct VhsParams {
     tracking_height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VhsColorProfile {
+    Faded,
+    Preserved,
+}
+
+fn parse_vhs_color_profile(value: &str) -> VhsColorProfile {
+    match value {
+        "preserved" => VhsColorProfile::Preserved,
+        _ => VhsColorProfile::Faded,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VhsColorParams {
+    pre_contrast: f64,
+    pre_brightness: f64,
+    pre_saturation: f64,
+    pre_gamma: f64,
+    hue_saturation: f64,
+    post_contrast: f64,
+    post_brightness: f64,
+    post_saturation: f64,
+    post_gamma: f64,
+}
+
+fn vhs_color_params(p: VhsParams, profile: VhsColorProfile) -> VhsColorParams {
+    match profile {
+        VhsColorProfile::Faded => VhsColorParams {
+            pre_contrast: 0.94 - p.ghost_opacity * 0.20,
+            pre_brightness: 0.018 + p.tracking_alpha * 0.04,
+            pre_saturation: 0.72 - p.ghost_opacity * 0.35,
+            pre_gamma: 1.10 + p.ghost_opacity * 0.35,
+            hue_saturation: 0.82 - p.ghost_opacity * 0.30,
+            post_contrast: 0.88 - p.ghost_opacity * 0.18,
+            post_brightness: 0.010 + p.tracking_alpha * 0.03,
+            post_saturation: 0.68 - p.ghost_opacity * 0.25,
+            post_gamma: 1.08 + p.ghost_opacity * 0.24,
+        },
+        VhsColorProfile::Preserved => VhsColorParams {
+            pre_contrast: 0.99 - p.ghost_opacity * 0.12,
+            pre_brightness: 0.012 + p.tracking_alpha * 0.025,
+            pre_saturation: 0.86 - p.ghost_opacity * 0.42,
+            pre_gamma: 1.04 + p.ghost_opacity * 0.16,
+            hue_saturation: 1.00 - p.ghost_opacity * 0.42,
+            post_contrast: 0.96 - p.ghost_opacity * 0.10,
+            post_brightness: 0.006 + p.tracking_alpha * 0.015,
+            post_saturation: 0.90 - p.ghost_opacity * 0.43,
+            post_gamma: 1.03 + p.ghost_opacity * 0.12,
+        },
+    }
+}
+
 fn vhs_params(intensity: u32) -> VhsParams {
     let t = intensity.min(100) as f64 / 100.0;
     VhsParams {
@@ -785,10 +842,36 @@ fn vhs_params(intensity: u32) -> VhsParams {
     }
 }
 
-fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32, scanlines: bool) -> String {
+fn build_tracking_distortion(p: VhsParams) -> String {
+    let skew = 4 + p.rgb_shift * 2;
+    let half_skew = (skew / 2).max(1);
+    let neg_skew = -skew;
+    let neg_half_skew = -half_skew;
+    let secondary_tracking = p.tracking_alpha * 0.70;
+    let secondary_height = (p.tracking_height / 2).max(1);
+
+    // Two staggered gates give the tracking hits a less regular cadence while staying reproducible.
+    format!(
+        "drawbox=x=0:y='trunc(mod(t*61,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,3.1),0.16)',\
+         drawbox=x=0:y='trunc(mod(t*83+ih/3,ih))':w=iw:h={secondary_height}:c=black@{secondary_tracking:.2}:t=fill:enable='lt(mod(t+1.7,4.4),0.12)',\
+         perspective=x0={skew}:y0=0:x1=W+{skew}:y1=0:x2={neg_half_skew}:y2=H:x3=W{neg_half_skew}:y3=H:interpolation=linear:eval=init:enable='lt(mod(t,3.1),0.16)',\
+         perspective=x0={neg_skew}:y0=0:x1=W{neg_skew}:y1=0:x2={half_skew}:y2=H:x3=W+{half_skew}:y3=H:interpolation=linear:eval=init:enable='lt(mod(t+1.7,4.4),0.12)'",
+        track_height = p.tracking_height,
+        tracking = p.tracking_alpha,
+    )
+}
+
+fn build_vhs_filter_chain(
+    input_label: &str,
+    output_label: &str,
+    intensity: u32,
+    scanlines: bool,
+    color_profile: VhsColorProfile,
+) -> String {
     let p = vhs_params(intensity);
     let chroma_shift = p.chroma_shift;
     let rgb_shift = p.rgb_shift;
+    let tracking_distortion = build_tracking_distortion(p);
 
     if scanlines {
         format!(
@@ -801,7 +884,7 @@ fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32,
              noise=alls={noise}:allf=t+u,\
              eq=contrast={contrast:.2}:brightness={brightness:.3}:saturation={saturation:.2}:gamma={gamma:.2},\
              drawgrid=w=iw:h=2:t=1:c=black@{scanlines:.2},\
-             drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
+             {tracking_distortion},\
              vignette=angle=PI/5,format=yuv420p{output_label}",
             blur = p.blur_radius,
             chroma_blur = p.blur_radius + 0.40,
@@ -814,10 +897,9 @@ fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32,
             saturation = p.saturation,
             gamma = p.gamma,
             scanlines = p.scanline_alpha,
-            tracking = p.tracking_alpha,
-            track_height = p.tracking_height,
         )
     } else {
+        let color = vhs_color_params(p, color_profile);
         format!(
             "{input_label}\
              scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1,\
@@ -827,35 +909,33 @@ fn build_vhs_filter_chain(input_label: &str, output_label: &str, intensity: u32,
              chromashift=cbh={chroma_shift}:crh={neg_chroma_shift}:cbv=1:crv=-1:edge=smear,\
              lagfun=decay={lag_decay:.2},\
              noise=alls={soft_noise}:allf=t:all_seed=37,\
-             drawbox=x=0:y='trunc(mod(t*47,ih))':w=iw:h={track_height}:c=white@{tracking:.2}:t=fill:enable='lt(mod(t,5.7),0.18)',\
+             {tracking_distortion},\
              format=rgba,rgbashift=rh={rgb_shift}:bh={neg_rgb_shift}:rv=1:bv=-1:edge=smear,\
              boxblur=luma_radius=0.80:luma_power=1:chroma_radius=0.80:chroma_power=1,\
              eq=contrast={post_contrast:.2}:brightness={post_brightness:.3}:saturation={post_saturation:.2}:gamma={post_gamma:.2},\
              vignette=angle=PI/4,format=yuv420p{output_label}",
-            pre_contrast = 0.94 - p.ghost_opacity * 0.20,
-            pre_brightness = 0.018 + p.tracking_alpha * 0.04,
-            pre_saturation = 0.72 - p.ghost_opacity * 0.35,
-            pre_gamma = 1.10 + p.ghost_opacity * 0.35,
-            hue_saturation = 0.82 - p.ghost_opacity * 0.30,
+            pre_contrast = color.pre_contrast,
+            pre_brightness = color.pre_brightness,
+            pre_saturation = color.pre_saturation,
+            pre_gamma = color.pre_gamma,
+            hue_saturation = color.hue_saturation,
             soft_blur = p.blur_radius + 1.00,
             soft_chroma_blur = p.blur_radius + 1.45,
             neg_chroma_shift = -chroma_shift,
             lag_decay = 0.88 + p.ghost_opacity * 0.20,
             soft_noise = (2 + p.noise_strength / 4).min(8),
-            tracking = p.tracking_alpha,
-            track_height = p.tracking_height,
             neg_rgb_shift = -rgb_shift,
-            post_contrast = 0.88 - p.ghost_opacity * 0.18,
-            post_brightness = 0.010 + p.tracking_alpha * 0.03,
-            post_saturation = 0.68 - p.ghost_opacity * 0.25,
-            post_gamma = 1.08 + p.ghost_opacity * 0.24,
+            post_contrast = color.post_contrast,
+            post_brightness = color.post_brightness,
+            post_saturation = color.post_saturation,
+            post_gamma = color.post_gamma,
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_vhs_filter_chain, vhs_params};
+    use super::{build_vhs_filter_chain, parse_vhs_color_profile, vhs_params, VhsColorProfile};
 
     #[test]
     fn vhs_params_clamp_intensity_to_100() {
@@ -879,7 +959,7 @@ mod tests {
 
     #[test]
     fn vhs_filter_chain_contains_crt_export_steps() {
-        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, true);
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, true, VhsColorProfile::Faded);
 
         assert!(chain.starts_with("[0:v]scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1"));
         assert!(chain.contains("boxblur="));
@@ -889,23 +969,65 @@ mod tests {
         assert!(chain.contains("noise=alls="));
         assert!(chain.contains("eq=contrast="));
         assert!(chain.contains("drawgrid=w=iw:h=2:t=1"));
-        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*47,ih))'"));
+        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*61,ih))'"));
+        assert!(chain.contains("perspective=x0="));
         assert!(chain.ends_with("format=yuv420p[vout]"));
     }
 
     #[test]
     fn vhs_filter_chain_can_omit_scanlines_but_keep_distortion() {
-        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, false);
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Faded);
 
         assert!(chain.starts_with("[0:v]scale=trunc(ih*4/3/2)*2:trunc(ih/2)*2,setsar=1"));
         assert!(!chain.contains("drawgrid="));
-        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*47,ih))'"));
+        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*61,ih))'"));
+        assert!(chain.contains("drawbox=x=0:y='trunc(mod(t*83+ih/3,ih))'"));
+        assert!(chain.contains("perspective=x0="));
         assert!(chain.contains("lagfun=decay="));
         assert!(chain.contains("chromashift="));
         assert!(chain.contains("rgbashift="));
         assert!(chain.contains("boxblur="));
         assert!(chain.contains("noise=alls="));
         assert!(chain.ends_with("format=yuv420p[vout]"));
+    }
+
+    #[test]
+    fn vhs_tracking_distortion_is_more_frequent_and_skews_frame() {
+        let chain = build_vhs_filter_chain("[0:v]", "[vout]", 40, true, VhsColorProfile::Faded);
+
+        assert!(!chain.contains("mod(t,5.7)"));
+        assert!(chain.contains("enable='lt(mod(t,3.1),0.16)'"));
+        assert!(chain.contains("enable='lt(mod(t+1.7,4.4),0.12)'"));
+        assert!(chain.contains("perspective=x0=8:y0=0:x1=W+8:y1=0:x2=-4:y2=H:x3=W-4:y3=H"));
+        assert!(chain.contains("perspective=x0=-8:y0=0:x1=W-8:y1=0:x2=4:y2=H:x3=W+4:y3=H"));
+    }
+
+    #[test]
+    fn vhs_color_profile_defaults_to_faded() {
+        assert_eq!(parse_vhs_color_profile("faded"), VhsColorProfile::Faded);
+        assert_eq!(parse_vhs_color_profile("preserved"), VhsColorProfile::Preserved);
+        assert_eq!(parse_vhs_color_profile("unknown"), VhsColorProfile::Faded);
+    }
+
+    #[test]
+    fn vhs_preserved_color_profile_is_less_washed_than_faded() {
+        let faded = build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Faded);
+        let preserved = build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Preserved);
+
+        assert!(faded.contains("eq=contrast=0.90:brightness=0.022:saturation=0.65:gamma=1.17"));
+        assert!(faded.contains("hue=h=-8:s=0.76"));
+        assert!(faded.contains("eq=contrast=0.85:brightness=0.013:saturation=0.63:gamma=1.13"));
+
+        assert!(preserved.contains("eq=contrast=0.97:brightness=0.015:saturation=0.78:gamma=1.07"));
+        assert!(preserved.contains("hue=h=-8:s=0.92"));
+        assert!(preserved.contains("eq=contrast=0.94:brightness=0.008:saturation=0.82:gamma=1.05"));
+
+        assert!(!preserved.contains("drawgrid="));
+        assert!(preserved.contains("drawbox=x=0:y='trunc(mod(t*61,ih))'"));
+        assert!(preserved.contains("perspective=x0="));
+        assert!(preserved.contains("lagfun=decay="));
+        assert!(preserved.contains("chromashift="));
+        assert!(preserved.contains("rgbashift="));
     }
 }
 
