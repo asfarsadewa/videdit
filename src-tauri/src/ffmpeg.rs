@@ -353,8 +353,9 @@ pub fn export_segments(
                 "-c:v", "libx264", "-preset", "medium",
                 "-crf", &quality.to_string(),
                 "-c:a", "aac", "-b:a", "192k",
-                "-avoid_negative_ts", "make_zero", "-map", "0",
+                "-avoid_negative_ts", "make_zero",
             ]);
+            map_primary_video_and_optional_audio(&mut cmd);
             if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
                 cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
@@ -365,8 +366,9 @@ pub fn export_segments(
                 "-c:v", "libx264", "-preset", "medium",
                 "-crf", &quality.to_string(),
                 "-c:a", "aac", "-b:a", "192k",
-                "-avoid_negative_ts", "make_zero", "-map", "0",
+                "-avoid_negative_ts", "make_zero",
             ]);
+            map_primary_video_and_optional_audio(&mut cmd);
             if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
                 cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
@@ -378,6 +380,7 @@ pub fn export_segments(
                 "-c:a", "aac", "-b:a", "192k",
                 "-avoid_negative_ts", "make_zero",
             ]);
+            map_primary_video_and_optional_audio(&mut cmd);
             if let Some(ref srt) = seg_srt {
                 let srt_escaped = escape_path_for_filter(srt);
                 cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
@@ -686,6 +689,10 @@ fn has_audio_stream(app: &AppHandle, path: &str) -> bool {
         .as_array()
         .map(|arr| !arr.is_empty())
         .unwrap_or(false)
+}
+
+fn map_primary_video_and_optional_audio(cmd: &mut Command) {
+    cmd.args(["-map", "0:v:0", "-map", "0:a?"]);
 }
 
 /// Build the FFmpeg filter_complex args for video effects, subtitle burning,
@@ -1021,7 +1028,8 @@ fn build_vhs_filter_chain(
 mod tests {
     use super::{
         build_export_filter_cmd, build_vhs_filter_chain, parse_vhs_color_profile,
-        push_radio_effect_filters, radio_params, vhs_params, AudioTrack, VhsColorProfile,
+        map_primary_video_and_optional_audio, push_radio_effect_filters, radio_params, vhs_params,
+        AudioTrack, VhsColorProfile,
     };
     use std::process::Command;
 
@@ -1171,6 +1179,21 @@ mod tests {
         assert!(filter_complex.contains("[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout_mix]"));
         assert!(filter_complex.contains("[aout_mix]aformat=channel_layouts=mono[aout]"));
         assert!(args.windows(2).any(|pair| pair[0] == "-ac" && pair[1] == "1"));
+    }
+
+    #[test]
+    fn reencode_mapping_excludes_extra_non_audio_video_streams() {
+        let mut cmd = Command::new("ffmpeg");
+
+        map_primary_video_and_optional_audio(&mut cmd);
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args, vec!["-map", "0:v:0", "-map", "0:a?"]);
+        assert!(!args.windows(2).any(|pair| pair[0] == "-map" && pair[1] == "0"));
     }
 
     #[test]
