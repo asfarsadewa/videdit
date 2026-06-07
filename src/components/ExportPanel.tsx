@@ -1,23 +1,36 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import type { Segment, ExportProgress, Subtitle, AudioTrack } from "../types";
+import type { Segment, ExportProgress, Subtitle, AudioTrack, EmbeddedSubtitleTrack } from "../types";
 import { formatDuration } from "../utils/format";
 
 interface ExportPanelProps {
   inputPath: string;
+  duration: number;
   segments: Segment[];
   subtitles: Subtitle[];
+  subtitleTracks: EmbeddedSubtitleTrack[];
   audioTracks: AudioTrack[];
   isFromRecording?: boolean;
 }
 
-export default function ExportPanel({ inputPath, segments, subtitles, audioTracks, isFromRecording }: ExportPanelProps) {
+type SubtitleOption = 'none' | 'authoredSrt' | 'authoredBurn' | 'embeddedBurn';
+
+export default function ExportPanel({
+  inputPath,
+  duration,
+  segments,
+  subtitles,
+  subtitleTracks,
+  audioTracks,
+  isFromRecording,
+}: ExportPanelProps) {
   const [merge, setMerge] = useState(true);
   const [compress, setCompress] = useState(false);
   const [quality, setQuality] = useState(23);
-  const [subtitleOption, setSubtitleOption] = useState<'none' | 'srt' | 'burn'>('none');
+  const [subtitleOption, setSubtitleOption] = useState<SubtitleOption>('none');
+  const [selectedEmbeddedSubtitleIndex, setSelectedEmbeddedSubtitleIndex] = useState<number | null>(null);
   const [originalRadio, setOriginalRadio] = useState(false);
   const [originalRadioIntensity, setOriginalRadioIntensity] = useState(30);
   const [vhsEffect, setVhsEffect] = useState(false);
@@ -27,6 +40,23 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const isWholeExport = segments.length === 0;
+  const exportRange: 'segments' | 'whole' = isWholeExport ? 'whole' : 'segments';
+  const effectiveMerge = !isWholeExport && segments.length > 1 && merge;
+  const totalDuration = isWholeExport ? duration : segments.reduce((sum, s) => sum + (s.end - s.start), 0);
+  const supportedEmbeddedTracks = useMemo(
+    () => subtitleTracks.filter((track) => track.supportedForBurn),
+    [subtitleTracks],
+  );
+  const segmentById = useMemo(() => new Map(segments.map((segment) => [segment.id, segment])), [segments]);
+  const exportableAudioTracks = useMemo(
+    () => audioTracks.filter((track) => segmentById.has(track.segmentId)),
+    [audioTracks, segmentById],
+  );
+  const selectedEmbeddedTrack = supportedEmbeddedTracks.find(
+    (track) => track.subtitleIndex === selectedEmbeddedSubtitleIndex,
+  );
 
   useEffect(() => {
     const unlisten = listen<ExportProgress>("export-progress", (event) => {
@@ -38,12 +68,28 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
   }, []);
 
   useEffect(() => {
-    if (subtitles.length === 0) {
+    if (subtitles.length === 0 && (subtitleOption === 'authoredSrt' || subtitleOption === 'authoredBurn')) {
       setSubtitleOption('none');
     }
-  }, [subtitles.length]);
+  }, [subtitles.length, subtitleOption]);
 
-  const totalDuration = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
+  useEffect(() => {
+    if (supportedEmbeddedTracks.length === 0) {
+      setSelectedEmbeddedSubtitleIndex(null);
+      if (subtitleOption === 'embeddedBurn') {
+        setSubtitleOption('none');
+      }
+      return;
+    }
+
+    const selectionStillExists = supportedEmbeddedTracks.some(
+      (track) => track.subtitleIndex === selectedEmbeddedSubtitleIndex,
+    );
+    if (!selectionStillExists) {
+      const defaultTrack = supportedEmbeddedTracks.find((track) => track.isDefault) ?? supportedEmbeddedTracks[0];
+      setSelectedEmbeddedSubtitleIndex(defaultTrack.subtitleIndex);
+    }
+  }, [supportedEmbeddedTracks, selectedEmbeddedSubtitleIndex, subtitleOption]);
 
   const handleExport = useCallback(async () => {
     setError(null);
@@ -64,18 +110,21 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
           start: s.start,
           end: s.end,
         })),
-        subtitles: subtitleOption !== 'none' ? subtitles.map((s) => ({
+        subtitles: subtitleOption === 'authoredSrt' || subtitleOption === 'authoredBurn' ? subtitles.map((s) => ({
           start: s.start,
           end: s.end,
           text: s.text,
         })) : [],
         outputPath,
-        merge,
+        exportRange,
+        videoDuration: duration,
+        merge: effectiveMerge,
         compress,
         quality,
-        burnSubtitles: subtitleOption === 'burn',
-        audioTracks: audioTracks.map((t) => {
-          const segment = segments.find(s => s.id === t.segmentId)!;
+        subtitleMode: subtitleOption,
+        embeddedSubtitleIndex: subtitleOption === 'embeddedBurn' ? selectedEmbeddedSubtitleIndex : null,
+        audioTracks: exportableAudioTracks.map((t) => {
+          const segment = segmentById.get(t.segmentId)!;
           return {
             id: t.id,
             segmentId: t.segmentId,
@@ -107,31 +156,63 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
       setError(String(e));
       setExporting(false);
     }
-  }, [inputPath, segments, subtitles, audioTracks, merge, compress, quality, subtitleOption, originalRadio, originalRadioIntensity, vhsEffect, vhsIntensity, vhsScanlines, vhsColorProfile, isFromRecording]);
+  }, [
+    inputPath,
+    duration,
+    segments,
+    subtitles,
+    exportRange,
+    effectiveMerge,
+    compress,
+    quality,
+    subtitleOption,
+    selectedEmbeddedSubtitleIndex,
+    exportableAudioTracks,
+    segmentById,
+    originalRadio,
+    originalRadioIntensity,
+    vhsEffect,
+    vhsIntensity,
+    vhsScanlines,
+    vhsColorProfile,
+    isFromRecording,
+  ]);
 
   const isDisabled =
-    (segments.length === 0 && !(subtitles.length > 0 && subtitleOption === 'srt'))
-    || exporting;
+    exporting
+    || (isWholeExport && duration <= 0)
+    || (subtitleOption === 'embeddedBurn' && !selectedEmbeddedTrack);
+  const hasSubtitleControls = subtitles.length > 0 || subtitleTracks.length > 0;
+  const isBurningSubtitles = subtitleOption === 'authoredBurn' || subtitleOption === 'embeddedBurn';
 
   return (
     <div className="p-4 border-t border-zinc-800 space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-sm text-zinc-400">
-          <span className="text-zinc-200 font-medium">{segments.length}</span> segment
-          {segments.length !== 1 ? "s" : ""} ·{" "}
+          {isWholeExport ? (
+            <span className="text-zinc-200 font-medium">Whole video</span>
+          ) : (
+            <>
+              <span className="text-zinc-200 font-medium">{segments.length}</span> segment
+              {segments.length !== 1 ? "s" : ""}
+            </>
+          )}{" "}
+          ·{" "}
           <span className="text-zinc-200 font-medium">{formatDuration(totalDuration)}</span> total
         </div>
 
-        <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={merge}
-            onChange={(e) => setMerge(e.target.checked)}
-            className="accent-emerald-500"
-            disabled={segments.length <= 1}
-          />
-          Merge into single file
-        </label>
+        {!isWholeExport && (
+          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={effectiveMerge}
+              onChange={(e) => setMerge(e.target.checked)}
+              className="accent-emerald-500"
+              disabled={segments.length <= 1}
+            />
+            Merge into single file
+          </label>
+        )}
       </div>
 
       <div className="flex items-center gap-4">
@@ -146,10 +227,10 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         </label>
       </div>
 
-      {subtitles.length > 0 && (
+      {hasSubtitleControls && (
         <div className="space-y-2">
           <span className="text-sm text-zinc-400">Subtitles:</span>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4">
             <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
               <input
                 type="radio"
@@ -160,27 +241,61 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
               />
               Don't export
             </label>
-            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-              <input
-                type="radio"
-                name="subtitleOption"
-                checked={subtitleOption === 'srt'}
-                onChange={() => setSubtitleOption('srt')}
-                className="accent-cyan-500"
-              />
-              Export as .srt file
-            </label>
-            <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-              <input
-                type="radio"
-                name="subtitleOption"
-                checked={subtitleOption === 'burn'}
-                onChange={() => setSubtitleOption('burn')}
-                className="accent-cyan-500"
-              />
-              Burn into video (re-encodes)
-            </label>
+            {subtitles.length > 0 && (
+              <>
+                <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="subtitleOption"
+                    checked={subtitleOption === 'authoredSrt'}
+                    onChange={() => setSubtitleOption('authoredSrt')}
+                    className="accent-cyan-500"
+                  />
+                  Export authored .srt
+                </label>
+                <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="subtitleOption"
+                    checked={subtitleOption === 'authoredBurn'}
+                    onChange={() => setSubtitleOption('authoredBurn')}
+                    className="accent-cyan-500"
+                  />
+                  Burn authored subtitles
+                </label>
+              </>
+            )}
+            {supportedEmbeddedTracks.length > 0 && (
+              <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
+                <input
+                  type="radio"
+                  name="subtitleOption"
+                  checked={subtitleOption === 'embeddedBurn'}
+                  onChange={() => setSubtitleOption('embeddedBurn')}
+                  className="accent-cyan-500"
+                />
+                Burn embedded subtitle
+              </label>
+            )}
+            {subtitleOption === 'embeddedBurn' && supportedEmbeddedTracks.length > 0 && (
+              <select
+                value={selectedEmbeddedSubtitleIndex ?? ""}
+                onChange={(e) => setSelectedEmbeddedSubtitleIndex(Number(e.target.value))}
+                className="min-w-52 max-w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-200"
+              >
+                {supportedEmbeddedTracks.map((track) => (
+                  <option key={track.subtitleIndex} value={track.subtitleIndex}>
+                    {track.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
+          {subtitleTracks.length > 0 && supportedEmbeddedTracks.length === 0 && (
+            <p className="text-xs text-zinc-600">
+              Embedded subtitles detected, but none are text-based tracks that can be burned in.
+            </p>
+          )}
         </div>
       )}
 
@@ -292,10 +407,10 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
         )}
       </div>
 
-      {audioTracks.length > 0 && (
+      {exportableAudioTracks.length > 0 && (
         <p className="text-xs text-amber-500/70">
-          {audioTracks.length} audio track{audioTracks.length !== 1 ? "s" : ""} will be mixed into the export
-          {audioTracks.some((t) => t.radioEffect) && " (includes AM/SW processing)"}
+          {exportableAudioTracks.length} audio track{exportableAudioTracks.length !== 1 ? "s" : ""} will be mixed into the export
+          {exportableAudioTracks.some((t) => t.radioEffect) && " (includes AM/SW processing)"}
         </p>
       )}
 
@@ -309,7 +424,9 @@ export default function ExportPanel({ inputPath, segments, subtitles, audioTrack
               : "VHS/CRT export re-encodes video into stretched 4:3 with soft tube blur, bleed, wash, and tracking distortion."
           : compress
           ? "Re-encoded export — frame-accurate cuts."
-          : audioTracks.length > 0 || originalRadio
+          : isBurningSubtitles
+            ? "Subtitle burn-in re-encodes video."
+          : exportableAudioTracks.length > 0 || originalRadio
             ? "Video copied losslessly, audio re-encoded for mixing."
             : "Lossless export — cuts occur at nearest keyframe (±1-2s accuracy)."}
       </p>

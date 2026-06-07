@@ -421,6 +421,12 @@ export default function App() {
             <span className="text-xs text-zinc-600">
               {videoInfo.width}x{videoInfo.height} · {videoInfo.codec} · {videoInfo.fps.toFixed(1)} fps
             </span>
+            {videoInfo.subtitleTracks.length > 0 && (
+              <span className="text-xs text-zinc-600">
+                {videoInfo.subtitleTracks.length} subtitle track
+                {videoInfo.subtitleTracks.length !== 1 ? "s" : ""}
+              </span>
+            )}
           </>
         )}
         {loading && <span className="text-xs text-zinc-500">Loading...</span>}
@@ -587,8 +593,10 @@ export default function App() {
             </div>
             <ExportPanel
               inputPath={videoInfo!.path}
+              duration={duration || videoInfo!.duration}
               segments={segments}
               subtitles={subtitles}
+              subtitleTracks={videoInfo!.subtitleTracks}
               audioTracks={audioTracks}
               isFromRecording={isFromRecording}
             />

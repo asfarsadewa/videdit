@@ -5,6 +5,19 @@ export interface VideoInfo {
   height: number;
   codec: string;
   fps: number;
+  subtitleTracks: EmbeddedSubtitleTrack[];
+}
+
+export interface EmbeddedSubtitleTrack {
+  streamIndex: number;
+  subtitleIndex: number;
+  codec: string;
+  language: string | null;
+  title: string | null;
+  isDefault: boolean;
+  isForced: boolean;
+  supportedForBurn: boolean;
+  label: string;
 }
 
 export interface Segment {
@@ -20,6 +33,7 @@ export interface ExportOptions {
   merge: boolean;
   compress: boolean;
   quality: number;
+  exportRange: 'segments' | 'whole';
   vhsEffect: boolean;
   vhsIntensity: number;
   vhsScanlines: boolean;

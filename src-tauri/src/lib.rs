@@ -5,7 +5,7 @@ mod recording;
 use std::sync::{Arc, Mutex};
 
 use audio_capture::{AudioDevice, AudioCaptureHandle};
-use ffmpeg::{AudioInfo, AudioTrack, Segment, VideoInfo};
+use ffmpeg::{AudioInfo, AudioTrack, ExportRange, Segment, SubtitleExportMode, VideoInfo};
 use recording::SharedRecordingState;
 use tauri::Emitter;
 use tauri::Manager;
@@ -51,10 +51,13 @@ fn export_video(
     segments: Vec<Segment>,
     subtitles: Vec<ffmpeg::Subtitle>,
     output_path: String,
+    export_range: ExportRange,
+    video_duration: f64,
     merge: bool,
     compress: bool,
     quality: u32,
-    burn_subtitles: bool,
+    subtitle_mode: SubtitleExportMode,
+    embedded_subtitle_index: Option<usize>,
     audio_tracks: Vec<AudioTrack>,
     original_radio: bool,
     original_radio_intensity: u32,
@@ -84,10 +87,13 @@ fn export_video(
         &segments,
         &subtitles,
         &output_path,
+        export_range,
+        video_duration,
         merge,
         compress,
         quality,
-        burn_subtitles,
+        subtitle_mode,
+        embedded_subtitle_index,
         &audio_tracks,
         original_radio,
         original_radio_intensity,

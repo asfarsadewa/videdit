@@ -12,6 +12,39 @@ pub struct VideoInfo {
     pub height: u32,
     pub codec: String,
     pub fps: f64,
+    #[serde(rename = "subtitleTracks")]
+    pub subtitle_tracks: Vec<EmbeddedSubtitleTrack>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedSubtitleTrack {
+    pub stream_index: usize,
+    pub subtitle_index: usize,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+    pub supported_for_burn: bool,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportRange {
+    Segments,
+    Whole,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SubtitleExportMode {
+    #[serde(rename = "none")]
+    None,
+    AuthoredSrt,
+    AuthoredBurn,
+    EmbeddedBurn,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -65,8 +98,8 @@ pub struct ExportProgress {
 /// In production, they sit next to the main exe.
 /// `name` should match the externalBin config entry, e.g. "binaries/ffmpeg".
 pub fn resolve_sidecar(_app: &AppHandle, name: &str) -> Result<PathBuf, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
     let exe_dir = exe_path
         .parent()
         .ok_or("Current exe has no parent directory")?;
@@ -75,9 +108,7 @@ pub fn resolve_sidecar(_app: &AppHandle, name: &str) -> Result<PathBuf, String> 
 
     #[cfg(windows)]
     {
-        let needs_exe = sidecar_path
-            .extension()
-            .is_none_or(|ext| ext != "exe");
+        let needs_exe = sidecar_path.extension().is_none_or(|ext| ext != "exe");
         if needs_exe {
             sidecar_path.as_mut_os_string().push(".exe");
         }
@@ -115,8 +146,6 @@ pub fn probe_video(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
         "json",
         "-show_format",
         "-show_streams",
-        "-select_streams",
-        "v:0",
         path,
     ])
     .stdout(Stdio::piped())
@@ -132,12 +161,14 @@ pub fn probe_video(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
         return Err(format!("ffprobe failed: {stderr}"));
     }
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
 
-    let stream = json["streams"]
-        .as_array()
-        .and_then(|s| s.first())
+    let streams = json["streams"].as_array().ok_or("No streams found")?;
+
+    let stream = streams
+        .iter()
+        .find(|s| s["codec_type"].as_str().unwrap_or("") == "video")
         .ok_or("No video stream found")?;
 
     let duration = json["format"]["duration"]
@@ -153,6 +184,7 @@ pub fn probe_video(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
         .to_string();
 
     let fps = parse_fps(stream["r_frame_rate"].as_str().unwrap_or("0/1"));
+    let subtitle_tracks = parse_subtitle_tracks(streams);
 
     Ok(VideoInfo {
         path: path.to_string(),
@@ -161,7 +193,97 @@ pub fn probe_video(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
         height,
         codec,
         fps,
+        subtitle_tracks,
     })
+}
+
+fn parse_subtitle_tracks(streams: &[serde_json::Value]) -> Vec<EmbeddedSubtitleTrack> {
+    let mut subtitle_index = 0_usize;
+    let mut tracks = Vec::new();
+
+    for stream in streams {
+        if stream["codec_type"].as_str().unwrap_or("") != "subtitle" {
+            continue;
+        }
+
+        let stream_index = stream["index"].as_u64().unwrap_or(0) as usize;
+        let codec = stream["codec_name"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_ascii_lowercase();
+        let language = clean_optional_tag(stream["tags"]["language"].as_str());
+        let title = clean_optional_tag(stream["tags"]["title"].as_str());
+        let is_default = stream["disposition"]["default"].as_i64().unwrap_or(0) == 1;
+        let is_forced = stream["disposition"]["forced"].as_i64().unwrap_or(0) == 1;
+        let supported_for_burn = is_supported_subtitle_codec(&codec);
+        let label = build_subtitle_track_label(
+            subtitle_index,
+            language.as_deref(),
+            title.as_deref(),
+            is_default,
+            is_forced,
+            supported_for_burn,
+            &codec,
+        );
+
+        tracks.push(EmbeddedSubtitleTrack {
+            stream_index,
+            subtitle_index,
+            codec,
+            language,
+            title,
+            is_default,
+            is_forced,
+            supported_for_burn,
+            label,
+        });
+        subtitle_index += 1;
+    }
+
+    tracks
+}
+
+fn clean_optional_tag(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    (!trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("und")).then(|| trimmed.to_string())
+}
+
+fn is_supported_subtitle_codec(codec: &str) -> bool {
+    matches!(
+        codec.to_ascii_lowercase().as_str(),
+        "subrip" | "ass" | "ssa" | "webvtt" | "mov_text" | "text"
+    )
+}
+
+fn build_subtitle_track_label(
+    subtitle_index: usize,
+    language: Option<&str>,
+    title: Option<&str>,
+    is_default: bool,
+    is_forced: bool,
+    supported_for_burn: bool,
+    codec: &str,
+) -> String {
+    let mut parts = vec![format!("Subtitle {}", subtitle_index + 1)];
+
+    if let Some(language) = language {
+        parts.push(language.to_string());
+    }
+    if let Some(title) = title {
+        parts.push(title.to_string());
+    }
+    if is_default {
+        parts.push("default".to_string());
+    }
+    if is_forced {
+        parts.push("forced".to_string());
+    }
+    parts.push(codec.to_string());
+    if !supported_for_burn {
+        parts.push("unsupported".to_string());
+    }
+
+    parts.join(" - ")
 }
 
 pub fn probe_audio(app: &AppHandle, path: &str) -> Result<AudioInfo, String> {
@@ -192,15 +314,12 @@ pub fn probe_audio(app: &AppHandle, path: &str) -> Result<AudioInfo, String> {
         return Err(format!("ffprobe failed: {stderr}"));
     }
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse ffprobe output: {e}"))?;
 
     let has_audio = json["streams"]
         .as_array()
-        .map(|arr| {
-            !arr.is_empty()
-                && arr[0]["codec_type"].as_str().unwrap_or("") == "audio"
-        })
+        .map(|arr| !arr.is_empty() && arr[0]["codec_type"].as_str().unwrap_or("") == "audio")
         .unwrap_or(false);
 
     if !has_audio {
@@ -240,10 +359,13 @@ pub fn export_segments(
     segments: &[Segment],
     subtitles: &[Subtitle],
     output_path: &str,
+    export_range: ExportRange,
+    video_duration: f64,
     merge: bool,
     compress: bool,
     quality: u32,
-    burn_subtitles: bool,
+    subtitle_mode: SubtitleExportMode,
+    embedded_subtitle_index: Option<usize>,
     audio_tracks: &[AudioTrack],
     original_radio: bool,
     original_radio_intensity: u32,
@@ -252,29 +374,33 @@ pub fn export_segments(
     vhs_scanlines: bool,
     vhs_color_profile: &str,
 ) -> Result<String, String> {
+    validate_subtitle_export_options(
+        app,
+        input_path,
+        subtitles,
+        subtitle_mode,
+        embedded_subtitle_index,
+    )?;
+
+    let effective_segments = normalize_export_segments(segments, export_range, video_duration)?;
+    let segments = effective_segments.as_slice();
+    let total = segments.len();
+    let merge = merge && total > 1;
+    let burn_authored_subtitles = subtitle_mode == SubtitleExportMode::AuthoredBurn;
+    let selected_embedded_subtitle_index = if subtitle_mode == SubtitleExportMode::EmbeddedBurn {
+        embedded_subtitle_index
+    } else {
+        None
+    };
+
     let ffmpeg = resolve_sidecar(app, "ffmpeg")?;
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
-    let total = segments.len();
 
     let mut temp_files: Vec<PathBuf> = Vec::new();
 
     // Export SRT alongside video if not burning (handles subtitle-only export too)
-    if !subtitles.is_empty() && !burn_subtitles {
+    if subtitle_mode == SubtitleExportMode::AuthoredSrt {
         create_srt_for_export(subtitles, segments, output_path, merge)?;
-    }
-
-    // If only exporting SRT (no segments), we're done
-    if segments.is_empty() && !subtitles.is_empty() && !burn_subtitles {
-        let output_srt = PathBuf::from(output_path).with_extension("srt");
-        let progress = ExportProgress {
-            segment_index: 0,
-            total_segments: 1,
-            percent: 100.0,
-            phase: "done".to_string(),
-            message: "SRT file exported".to_string(),
-        };
-        let _ = app.emit("export-progress", &progress);
-        return Ok(output_srt.to_string_lossy().into_owned());
     }
 
     for (i, seg) in segments.iter().enumerate() {
@@ -294,10 +420,25 @@ pub fn export_segments(
         };
 
         // Create per-segment SRT with timestamps offset to segment start = 0
-        let seg_srt = if burn_subtitles && !subtitles.is_empty() {
-            create_srt_for_segment(subtitles, seg.start, seg.end, &temp_dir, &format!("sub_{i}.srt"))?
+        let seg_srt = if burn_authored_subtitles && !subtitles.is_empty() {
+            create_srt_for_segment(
+                subtitles,
+                seg.start,
+                seg.end,
+                &temp_dir,
+                &format!("sub_{i}.srt"),
+            )?
         } else {
             None
+        };
+        let subtitle_burn = if let Some(ref srt) = seg_srt {
+            Some(SubtitleBurnSource::AuthoredSrt(srt.as_path()))
+        } else {
+            selected_embedded_subtitle_index.map(|subtitle_index| SubtitleBurnSource::Embedded {
+                input_path: Path::new(input_path),
+                subtitle_index,
+                segment_start: seg.start,
+            })
         };
 
         // Find audio tracks that belong to this segment
@@ -312,8 +453,9 @@ pub fn export_segments(
         // This avoids referencing [0:a] in filters when the input has no audio.
         let input_has_audio = has_audio_stream(app, input_path);
         let effective_original_radio = original_radio && input_has_audio;
-        let effective_has_audio_processing = !overlapping_audio.is_empty() || effective_original_radio;
-        let effective_has_video_processing = seg_srt.is_some() || vhs_effect;
+        let effective_has_audio_processing =
+            !overlapping_audio.is_empty() || effective_original_radio;
+        let effective_has_video_processing = subtitle_burn.is_some() || vhs_effect;
 
         let mut cmd = Command::new(&ffmpeg);
         cmd.args(["-y", "-ss", &format!("{:.3}", seg.start), "-i", input_path]);
@@ -335,7 +477,7 @@ pub fn export_segments(
                 original_radio_intensity,
                 seg.start,
                 seg_duration,
-                seg_srt.as_deref(),
+                subtitle_burn.as_ref(),
                 compress,
                 quality,
                 merge,
@@ -349,36 +491,56 @@ pub fn export_segments(
             // When merging segments, always re-encode to a consistent profile
             // so the concat demuxer sees identical codec params across all segments.
             cmd.args([
-                "-t", &format!("{seg_duration:.3}"),
-                "-c:v", "libx264", "-preset", "medium",
-                "-crf", &quality.to_string(),
-                "-c:a", "aac", "-b:a", "192k",
-                "-avoid_negative_ts", "make_zero",
+                "-t",
+                &format!("{seg_duration:.3}"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                &quality.to_string(),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
             ]);
             map_primary_video_and_optional_audio(&mut cmd);
-            if let Some(ref srt) = seg_srt {
-                let srt_escaped = escape_path_for_filter(srt);
-                cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
-            }
         } else if compress {
             cmd.args([
-                "-t", &format!("{seg_duration:.3}"),
-                "-c:v", "libx264", "-preset", "medium",
-                "-crf", &quality.to_string(),
-                "-c:a", "aac", "-b:a", "192k",
-                "-avoid_negative_ts", "make_zero",
+                "-t",
+                &format!("{seg_duration:.3}"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                &quality.to_string(),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
             ]);
             map_primary_video_and_optional_audio(&mut cmd);
-            if let Some(ref srt) = seg_srt {
-                let srt_escaped = escape_path_for_filter(srt);
-                cmd.args(["-vf", &format!("subtitles='{}'", srt_escaped)]);
-            }
-        } else if burn_subtitles {
+        } else if burn_authored_subtitles {
             cmd.args([
-                "-t", &format!("{seg_duration:.3}"),
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k",
-                "-avoid_negative_ts", "make_zero",
+                "-t",
+                &format!("{seg_duration:.3}"),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
             ]);
             map_primary_video_and_optional_audio(&mut cmd);
             if let Some(ref srt) = seg_srt {
@@ -387,9 +549,14 @@ pub fn export_segments(
             }
         } else {
             cmd.args([
-                "-t", &format!("{seg_duration:.3}"),
-                "-c", "copy", "-avoid_negative_ts", "make_zero", "-map", "0",
+                "-t",
+                &format!("{seg_duration:.3}"),
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
             ]);
+            map_primary_video_and_optional_audio(&mut cmd);
         }
 
         cmd.arg(out_file.to_str().unwrap())
@@ -419,14 +586,21 @@ pub fn export_segments(
                         total_segments: total,
                         percent: overall,
                         phase: "cutting".to_string(),
-                        message: format!("Cutting segment {} of {} ({:.0}%)", i + 1, total, seg_percent),
+                        message: format!(
+                            "Cutting segment {} of {} ({:.0}%)",
+                            i + 1,
+                            total,
+                            seg_percent
+                        ),
                     };
                     let _ = app.emit("export-progress", &progress);
                 }
             }
         }
 
-        let status = child.wait().map_err(|e| format!("FFmpeg process error: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("FFmpeg process error: {e}"))?;
         if !status.success() {
             log::error!("FFmpeg stderr: {}", stderr_output);
             // Extract error lines (lines containing "Error" or at the end)
@@ -436,7 +610,11 @@ pub fn export_segments(
                 .take(3)
                 .collect();
             let error_msg = if error_lines.is_empty() {
-                stderr_output.lines().take(10).collect::<Vec<_>>().join(" | ")
+                stderr_output
+                    .lines()
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
             } else {
                 error_lines.join(" | ")
             };
@@ -466,8 +644,7 @@ pub fn export_segments(
 
         for (i, temp) in temp_files.iter().enumerate() {
             let dest = parent.join(format!("{}_{:03}.{}", stem, i + 1, ext));
-            std::fs::copy(temp, &dest)
-                .map_err(|e| format!("Failed to copy segment file: {e}"))?;
+            std::fs::copy(temp, &dest).map_err(|e| format!("Failed to copy segment file: {e}"))?;
         }
 
         let progress = ExportProgress {
@@ -695,6 +872,116 @@ fn map_primary_video_and_optional_audio(cmd: &mut Command) {
     cmd.args(["-map", "0:v:0", "-map", "0:a?"]);
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SubtitleBurnSource<'a> {
+    AuthoredSrt(&'a Path),
+    Embedded {
+        input_path: &'a Path,
+        subtitle_index: usize,
+        segment_start: f64,
+    },
+}
+
+fn validate_subtitle_export_options(
+    app: &AppHandle,
+    input_path: &str,
+    subtitles: &[Subtitle],
+    subtitle_mode: SubtitleExportMode,
+    embedded_subtitle_index: Option<usize>,
+) -> Result<(), String> {
+    validate_subtitle_source_combination(subtitles, subtitle_mode, embedded_subtitle_index)?;
+
+    if subtitle_mode == SubtitleExportMode::EmbeddedBurn {
+        let selected_index = embedded_subtitle_index
+            .ok_or("Embedded subtitle burn-in requires a subtitle track selection")?;
+        let info = probe_video(app, input_path)?;
+        let track = info
+            .subtitle_tracks
+            .iter()
+            .find(|track| track.subtitle_index == selected_index)
+            .ok_or_else(|| format!("Subtitle track {selected_index} was not found"))?;
+        if !track.supported_for_burn {
+            return Err(format!(
+                "Subtitle track {} uses unsupported codec {}",
+                selected_index + 1,
+                track.codec
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_subtitle_source_combination(
+    subtitles: &[Subtitle],
+    subtitle_mode: SubtitleExportMode,
+    embedded_subtitle_index: Option<usize>,
+) -> Result<(), String> {
+    match subtitle_mode {
+        SubtitleExportMode::None => {
+            if !subtitles.is_empty() {
+                return Err(
+                    "Subtitle mode is none but authored subtitles were provided".to_string()
+                );
+            }
+        }
+        SubtitleExportMode::AuthoredSrt | SubtitleExportMode::AuthoredBurn => {
+            if subtitles.is_empty() {
+                return Err("Authored subtitle export requires at least one subtitle".to_string());
+            }
+            if embedded_subtitle_index.is_some() {
+                return Err(
+                    "Authored subtitle export cannot also select an embedded subtitle".to_string(),
+                );
+            }
+        }
+        SubtitleExportMode::EmbeddedBurn => {
+            if !subtitles.is_empty() {
+                return Err(
+                    "Embedded subtitle burn-in cannot also use authored subtitles".to_string(),
+                );
+            }
+            if embedded_subtitle_index.is_none() {
+                return Err(
+                    "Embedded subtitle burn-in requires a subtitle track selection".to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_export_segments(
+    segments: &[Segment],
+    export_range: ExportRange,
+    video_duration: f64,
+) -> Result<Vec<Segment>, String> {
+    match export_range {
+        ExportRange::Segments => {
+            if segments.is_empty() {
+                return Err("Segment export requires at least one completed segment".to_string());
+            }
+            Ok(segments.to_vec())
+        }
+        ExportRange::Whole => {
+            if !segments.is_empty() {
+                return Err(
+                    "Whole-video export cannot be used while completed segments exist".to_string(),
+                );
+            }
+            if video_duration <= 0.0 {
+                return Err("Whole-video export requires a positive video duration".to_string());
+            }
+            Ok(vec![Segment {
+                id: "__whole__".to_string(),
+                start: 0.0,
+                end: video_duration,
+            }])
+        }
+    }
+}
+
 /// Build the FFmpeg filter_complex args for video effects, subtitle burning,
 /// audio mixing, and optional radio effects.
 fn build_export_filter_cmd(
@@ -704,7 +991,7 @@ fn build_export_filter_cmd(
     original_radio_intensity: u32,
     _seg_start: f64,
     seg_duration: f64,
-    seg_srt: Option<&Path>,
+    subtitle_burn: Option<&SubtitleBurnSource<'_>>,
     compress: bool,
     quality: u32,
     merge: bool,
@@ -742,9 +1029,7 @@ fn build_export_filter_cmd(
         let effective_duration = audio_duration.min(seg_duration);
 
         // Audio is already trimmed at input level, just apply volume and effects
-        let base = format!(
-            "[{input_idx}:a]asetpts=PTS-STARTPTS,volume={vol:.2}"
-        );
+        let base = format!("[{input_idx}:a]asetpts=PTS-STARTPTS,volume={vol:.2}");
 
         if audio.radio_effect {
             let eq_label = format!("dub{j}_eq");
@@ -788,21 +1073,32 @@ fn build_export_filter_cmd(
         *last = last.replace(&format!("[{label}]"), "[aout]");
     }
 
-    let has_aout = !audio_labels.is_empty()
-        && (audio_labels.len() > 1 || audio_labels[0] != "[0:a]");
+    let has_aout =
+        !audio_labels.is_empty() && (audio_labels.len() > 1 || audio_labels[0] != "[0:a]");
 
-    let has_vfilter = seg_srt.is_some() || vhs_effect;
+    let has_vfilter = subtitle_burn.is_some() || vhs_effect;
     let color_profile = parse_vhs_color_profile(vhs_color_profile);
-    if let Some(srt) = seg_srt {
-        let srt_escaped = escape_path_for_filter(srt);
+    if let Some(source) = subtitle_burn {
         if vhs_effect {
-            filters.push(format!("[0:v]subtitles='{srt_escaped}'[vsub]"));
-            filters.push(build_vhs_filter_chain("[vsub]", "[vout]", vhs_intensity, vhs_scanlines, color_profile));
+            filters.push(build_subtitle_burn_filter("[0:v]", "[vsub]", source));
+            filters.push(build_vhs_filter_chain(
+                "[vsub]",
+                "[vout]",
+                vhs_intensity,
+                vhs_scanlines,
+                color_profile,
+            ));
         } else {
-            filters.push(format!("[0:v]subtitles='{srt_escaped}'[vout]"));
+            filters.push(build_subtitle_burn_filter("[0:v]", "[vout]", source));
         }
     } else if vhs_effect {
-        filters.push(build_vhs_filter_chain("[0:v]", "[vout]", vhs_intensity, vhs_scanlines, color_profile));
+        filters.push(build_vhs_filter_chain(
+            "[0:v]",
+            "[vout]",
+            vhs_intensity,
+            vhs_scanlines,
+            color_profile,
+        ));
     }
 
     let filter_complex = filters.join(";");
@@ -844,6 +1140,31 @@ fn build_export_filter_cmd(
         cmd.args(["-ac", "1"]);
     }
     cmd.args(["-avoid_negative_ts", "make_zero"]);
+}
+
+fn build_subtitle_burn_filter(
+    input_label: &str,
+    output_label: &str,
+    source: &SubtitleBurnSource<'_>,
+) -> String {
+    match source {
+        SubtitleBurnSource::AuthoredSrt(path) => {
+            let srt_escaped = escape_path_for_filter(path);
+            format!("{input_label}subtitles='{srt_escaped}'{output_label}")
+        }
+        SubtitleBurnSource::Embedded {
+            input_path,
+            subtitle_index,
+            segment_start,
+        } => {
+            let input_escaped = escape_path_for_filter(input_path);
+            format!(
+                "{input_label}setpts=PTS+{segment_start:.6}/TB,\
+                 subtitles=filename='{input_escaped}':si={subtitle_index},\
+                 setpts=PTS-STARTPTS{output_label}"
+            )
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1027,11 +1348,14 @@ fn build_vhs_filter_chain(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_export_filter_cmd, build_vhs_filter_chain, parse_vhs_color_profile,
-        map_primary_video_and_optional_audio, push_radio_effect_filters, radio_params, vhs_params,
-        AudioTrack, VhsColorProfile,
+        build_export_filter_cmd, build_subtitle_burn_filter, build_vhs_filter_chain,
+        map_primary_video_and_optional_audio, normalize_export_segments, parse_subtitle_tracks,
+        parse_vhs_color_profile, push_radio_effect_filters, radio_params,
+        validate_subtitle_source_combination, vhs_params, AudioTrack, ExportRange, Segment,
+        Subtitle, SubtitleBurnSource, SubtitleExportMode, VhsColorProfile,
     };
-    use std::process::Command;
+    use serde_json::json;
+    use std::{path::Path, process::Command};
 
     #[test]
     fn vhs_params_clamp_intensity_to_100() {
@@ -1098,8 +1422,12 @@ mod tests {
         assert!(chain.contains("volume=2.20,asoftclip=type=tanh:threshold=0.95:output=0.90"));
         assert!(chain.contains("anoisesrc=d=2.000:c=white:r=22050:a=0.0150"));
         assert!(chain.contains("aevalsrc='if(lt(random(0),0.000041),0.6000*(2*random(1)-1),0)'"));
-        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]"));
-        assert!(chain.contains("[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(
+            chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]")
+        );
+        assert!(chain.contains(
+            "[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"
+        ));
         assert!(chain.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[out]"));
     }
 
@@ -1122,11 +1450,17 @@ mod tests {
         assert!(chain.contains("highshelf=f=1500:g=-5.0"));
         assert!(chain.contains("highpass=f=350,lowpass=f=2800"));
         assert!(chain.contains("volume=3.00,asoftclip=type=tanh:threshold=0.95:output=0.90"));
-        assert!(chain.contains("volume='1-0.315*(0.5-0.5*(0.7*sin(2*PI*0.17*t)+0.3*sin(2*PI*0.73*t)))':eval=frame[eq]"));
+        assert!(chain.contains(
+            "volume='1-0.315*(0.5-0.5*(0.7*sin(2*PI*0.17*t)+0.3*sin(2*PI*0.73*t)))':eval=frame[eq]"
+        ));
         assert!(chain.contains("anoisesrc=d=2.000:c=white:r=22050:a=0.0350"));
         assert!(chain.contains("aevalsrc='if(lt(random(0),0.000159),0.8200*(2*random(1)-1),0)'"));
-        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]"));
-        assert!(chain.contains("[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(
+            chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]")
+        );
+        assert!(chain.contains(
+            "[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"
+        ));
         assert!(chain.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[out]"));
     }
 
@@ -1174,11 +1508,17 @@ mod tests {
             .find_map(|pair| (pair[0] == "-filter_complex").then(|| pair[1].clone()))
             .expect("filter_complex arg should be present");
 
-        assert!(filter_complex.contains("[dub0_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(filter_complex.contains(
+            "[dub0_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"
+        ));
         assert!(filter_complex.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[dub0]"));
-        assert!(filter_complex.contains("[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout_mix]"));
+        assert!(filter_complex.contains(
+            "[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout_mix]"
+        ));
         assert!(filter_complex.contains("[aout_mix]aformat=channel_layouts=mono[aout]"));
-        assert!(args.windows(2).any(|pair| pair[0] == "-ac" && pair[1] == "1"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ac" && pair[1] == "1"));
     }
 
     #[test]
@@ -1193,7 +1533,162 @@ mod tests {
             .collect();
 
         assert_eq!(args, vec!["-map", "0:v:0", "-map", "0:a?"]);
-        assert!(!args.windows(2).any(|pair| pair[0] == "-map" && pair[1] == "0"));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "0"));
+    }
+
+    #[test]
+    fn subtitle_streams_are_parsed_with_ordinals_and_support_flags() {
+        let streams = vec![
+            json!({
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "h264"
+            }),
+            json!({
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac"
+            }),
+            json!({
+                "index": 2,
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "tags": { "language": "eng", "title": "English" },
+                "disposition": { "default": 1, "forced": 0 }
+            }),
+            json!({
+                "index": 5,
+                "codec_type": "subtitle",
+                "codec_name": "hdmv_pgs_subtitle",
+                "tags": { "language": "und", "title": "Signs" },
+                "disposition": { "default": 0, "forced": 1 }
+            }),
+        ];
+
+        let tracks = parse_subtitle_tracks(&streams);
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].stream_index, 2);
+        assert_eq!(tracks[0].subtitle_index, 0);
+        assert_eq!(tracks[0].codec, "subrip");
+        assert_eq!(tracks[0].language.as_deref(), Some("eng"));
+        assert_eq!(tracks[0].title.as_deref(), Some("English"));
+        assert!(tracks[0].is_default);
+        assert!(tracks[0].supported_for_burn);
+        assert!(tracks[0].label.contains("default"));
+
+        assert_eq!(tracks[1].stream_index, 5);
+        assert_eq!(tracks[1].subtitle_index, 1);
+        assert_eq!(tracks[1].language, None);
+        assert!(tracks[1].is_forced);
+        assert!(!tracks[1].supported_for_burn);
+        assert!(tracks[1].label.contains("unsupported"));
+    }
+
+    #[test]
+    fn embedded_subtitle_filter_restores_original_timeline_for_cuts() {
+        let source = SubtitleBurnSource::Embedded {
+            input_path: Path::new("movie.mkv"),
+            subtitle_index: 1,
+            segment_start: 12.5,
+        };
+
+        let filter = build_subtitle_burn_filter("[0:v]", "[vout]", &source);
+
+        assert!(filter.starts_with("[0:v]setpts=PTS+12.500000/TB"));
+        assert!(filter.contains("subtitles=filename='movie.mkv':si=1"));
+        assert!(filter.ends_with("setpts=PTS-STARTPTS[vout]"));
+    }
+
+    #[test]
+    fn embedded_subtitle_burn_maps_filtered_video_and_reencodes() {
+        let source = SubtitleBurnSource::Embedded {
+            input_path: Path::new("movie.mkv"),
+            subtitle_index: 1,
+            segment_start: 12.5,
+        };
+        let mut cmd = Command::new("ffmpeg");
+
+        build_export_filter_cmd(
+            &mut cmd,
+            &[],
+            false,
+            0,
+            12.5,
+            4.0,
+            Some(&source),
+            false,
+            23,
+            false,
+            true,
+            false,
+            40,
+            true,
+            "faded",
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let filter_complex = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then(|| pair[1].clone()))
+            .expect("filter_complex arg should be present");
+
+        assert!(filter_complex.contains("subtitles=filename='movie.mkv':si=1"));
+        assert!(filter_complex.contains("setpts=PTS-STARTPTS[vout]"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "[vout]"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c:v" && pair[1] == "libx264"));
+    }
+
+    #[test]
+    fn whole_export_normalizes_to_full_duration_segment() {
+        let normalized = normalize_export_segments(&[], ExportRange::Whole, 42.25)
+            .expect("whole export should create a synthetic segment");
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].id, "__whole__");
+        assert_eq!(normalized[0].start, 0.0);
+        assert_eq!(normalized[0].end, 42.25);
+
+        let existing = vec![Segment {
+            id: "seg-1".into(),
+            start: 1.0,
+            end: 2.0,
+        }];
+        assert!(normalize_export_segments(&existing, ExportRange::Whole, 42.25).is_err());
+        assert!(normalize_export_segments(&[], ExportRange::Segments, 42.25).is_err());
+    }
+
+    #[test]
+    fn subtitle_source_validation_rejects_mixed_embedded_and_authored_subtitles() {
+        let authored = vec![Subtitle {
+            start: 0.0,
+            end: 1.0,
+            text: "Hello".into(),
+        }];
+
+        let err = validate_subtitle_source_combination(
+            &authored,
+            SubtitleExportMode::EmbeddedBurn,
+            Some(0),
+        )
+        .expect_err("embedded burn should reject authored subtitles");
+
+        assert!(err.contains("cannot also use authored subtitles"));
+        assert!(validate_subtitle_source_combination(
+            &[],
+            SubtitleExportMode::EmbeddedBurn,
+            Some(0),
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1244,14 +1739,18 @@ mod tests {
     #[test]
     fn vhs_color_profile_defaults_to_faded() {
         assert_eq!(parse_vhs_color_profile("faded"), VhsColorProfile::Faded);
-        assert_eq!(parse_vhs_color_profile("preserved"), VhsColorProfile::Preserved);
+        assert_eq!(
+            parse_vhs_color_profile("preserved"),
+            VhsColorProfile::Preserved
+        );
         assert_eq!(parse_vhs_color_profile("unknown"), VhsColorProfile::Faded);
     }
 
     #[test]
     fn vhs_preserved_color_profile_is_less_washed_than_faded() {
         let faded = build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Faded);
-        let preserved = build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Preserved);
+        let preserved =
+            build_vhs_filter_chain("[0:v]", "[vout]", 40, false, VhsColorProfile::Preserved);
 
         assert!(faded.contains("eq=contrast=0.90:brightness=0.022:saturation=0.65:gamma=1.17"));
         assert!(faded.contains("hue=h=-8:s=0.76"));
@@ -1293,7 +1792,13 @@ fn write_srt_to_path(subtitles: &[Subtitle], path: &Path) -> Result<(), String> 
     for (i, sub) in subtitles.iter().enumerate() {
         let start = format_time_srt(sub.start);
         let end = format_time_srt(sub.end);
-        content.push_str(&format!("{}\n{} --> {}\n{}\n\n", i + 1, start, end, sub.text));
+        content.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            i + 1,
+            start,
+            end,
+            sub.text
+        ));
     }
     std::fs::write(path, &content).map_err(|e| format!("Failed to write SRT file: {e}"))
 }
@@ -1370,7 +1875,11 @@ fn create_srt_for_export(
             }
             cumulative_offset += seg.end - seg.start;
         }
-        remapped.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+        remapped.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let srt_path = out.with_extension("srt");
         write_srt_to_path(&remapped, &srt_path)?;
         log::info!("Saved SRT to: {:?}", srt_path);
