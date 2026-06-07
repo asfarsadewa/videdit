@@ -569,8 +569,10 @@ fn escape_path_for_filter(path: &std::path::Path) -> String {
 struct RadioParams {
     low_cut: f64,
     high_cut: f64,
+    tilt_db: f64,
+    drive: f64,
+    fade_depth: f64,
     noise_amp: f64,
-    ratio: f64,
     crackle_amp: f64,
     crackle_chance: f64,
 }
@@ -578,14 +580,15 @@ struct RadioParams {
 /// Radio effect parameters interpolated by intensity (0–100).
 fn radio_params(intensity: u32) -> RadioParams {
     let t = (intensity.min(100) as f64) / 100.0;
-    let sw_weight = t.powf(2.2);
     RadioParams {
-        low_cut: 200.0 + t * 300.0,
-        high_cut: 4000.0 - t * 1200.0,
-        noise_amp: 0.005 + t * 0.030 + sw_weight * 0.012,
-        ratio: 2.0 + t * 6.0,
-        crackle_amp: sw_weight * 0.16,
-        crackle_chance: sw_weight * 0.0012,
+        low_cut: 200.0 + t * 150.0,
+        high_cut: 4500.0 - t * 1700.0,
+        tilt_db: -3.0 - t * 2.0,
+        drive: 2.2 + t * 0.8,
+        fade_depth: 0.108 + t * 0.207,
+        noise_amp: 0.015 + t * 0.020,
+        crackle_amp: 0.600 + t * 0.220,
+        crackle_chance: 0.000041 + t * 0.000118,
     }
 }
 
@@ -602,33 +605,45 @@ fn push_radio_effect_filters(
     let p = radio_params(intensity);
     let mix_label = format!("{out_label}_mix");
     filters.push(format!(
-        "{input_chain}highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
-         acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[{eq_label}]",
+        "{input_chain}aformat=channel_layouts=mono,aresample=22050,\
+         highshelf=f=1500:g={tilt:.1},highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
+         volume={drive:.2},asoftclip=type=tanh:threshold=0.95:output=0.90,\
+         volume='1-{fade:.3}*(0.5-0.5*(0.7*sin(2*PI*0.17*t)+0.3*sin(2*PI*0.73*t)))':eval=frame[{eq_label}]",
         low_cut = p.low_cut,
         high_cut = p.high_cut,
-        ratio = p.ratio,
+        tilt = p.tilt_db,
+        drive = p.drive,
+        fade = p.fade_depth,
     ));
     filters.push(format!(
-        "anoisesrc=d={duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]",
+        "anoisesrc=d={duration:.3}:c=white:r=22050:a={noise_amp:.4},\
+         highpass=f={low_cut:.0},lowpass=f={high_cut:.0}[{noise_label}]",
         noise_amp = p.noise_amp,
+        low_cut = p.low_cut,
+        high_cut = p.high_cut,
     ));
 
     if p.crackle_amp > 0.0001 && p.crackle_chance > 0.000001 {
         filters.push(format!(
-            "aevalsrc='if(lt(random(0),{chance:.6}),{amp:.4}*(2*random(1)-1),0)':s=44100:d={duration:.3},\
-             highpass=f=1800[{crackle_label}]",
+            "aevalsrc='if(lt(random(0),{chance:.6}),{amp:.4}*(2*random(1)-1),0)':s=22050:d={duration:.3},\
+             highpass=f={low_cut:.0},lowpass=f={high_cut:.0}[{crackle_label}]",
             chance = p.crackle_chance,
             amp = p.crackle_amp,
+            low_cut = p.low_cut,
+            high_cut = p.high_cut,
         ));
         filters.push(format!(
-            "[{eq_label}][{noise_label}][{crackle_label}]amix=inputs=3:duration=first[{mix_label}]"
+            "[{eq_label}][{noise_label}][{crackle_label}]amix=inputs=3:duration=first:normalize=0[{mix_label}]"
         ));
     } else {
         filters.push(format!(
-            "[{eq_label}][{noise_label}]amix=inputs=2:duration=first[{mix_label}]"
+            "[{eq_label}][{noise_label}]amix=inputs=2:duration=first:normalize=0[{mix_label}]"
         ));
     }
-    filters.push(format!("[{mix_label}]aformat=channel_layouts=mono[{out_label}]"));
+    filters.push(format!(
+        "[{mix_label}]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26,\
+         alimiter=limit=0.95,aformat=channel_layouts=mono[{out_label}]"
+    ));
 }
 
 /// Quick probe to check whether the input file has at least one audio stream.
@@ -752,7 +767,7 @@ fn build_export_filter_cmd(
         let n = audio_labels.len();
         if has_radio_processing {
             filters.push(format!(
-                "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout_mix]"
+                "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0:normalize=0[aout_mix]"
             ));
             filters.push("[aout_mix]aformat=channel_layouts=mono[aout]".into());
         } else {
@@ -1036,21 +1051,26 @@ mod tests {
         let sw = radio_params(100);
 
         assert_eq!(am.low_cut, 200.0);
-        assert_eq!(am.high_cut, 4000.0);
-        assert_eq!(am.noise_amp, 0.005);
-        assert_eq!(am.crackle_amp, 0.0);
-        assert_eq!(am.crackle_chance, 0.0);
+        assert_eq!(am.high_cut, 4500.0);
+        assert_eq!(am.tilt_db, -3.0);
+        assert_eq!(am.drive, 2.2);
+        assert_eq!(am.fade_depth, 0.108);
+        assert_eq!(am.noise_amp, 0.015);
+        assert_eq!(am.crackle_amp, 0.600);
+        assert_eq!(am.crackle_chance, 0.000041);
 
-        assert_eq!(sw.low_cut, 500.0);
+        assert_eq!(sw.low_cut, 350.0);
         assert_eq!(sw.high_cut, 2800.0);
-        assert!(sw.noise_amp > 0.045);
-        assert!(sw.crackle_amp > 0.15);
-        assert!(sw.crackle_chance > 0.001);
-        assert!(sw.ratio > am.ratio);
+        assert_eq!(sw.tilt_db, -5.0);
+        assert_eq!(sw.drive, 3.0);
+        assert_eq!(sw.fade_depth, 0.315);
+        assert_eq!(sw.noise_amp, 0.035);
+        assert_eq!(sw.crackle_amp, 0.820);
+        assert_eq!(sw.crackle_chance, 0.000159);
     }
 
     #[test]
-    fn radio_filter_chain_keeps_am_without_crackle_layer() {
+    fn radio_filter_chain_uses_make_radio_sound_am_style() {
         let mut filters = Vec::new();
         push_radio_effect_filters(
             &mut filters,
@@ -1064,14 +1084,19 @@ mod tests {
         );
         let chain = filters.join(";");
 
-        assert!(chain.contains("anoisesrc=d=2.000:c=pink:r=44100:a=0.0050[noise]"));
-        assert!(!chain.contains("aevalsrc="));
-        assert!(chain.contains("[eq][noise]amix=inputs=2:duration=first[out_mix]"));
-        assert!(chain.contains("[out_mix]aformat=channel_layouts=mono[out]"));
+        assert!(chain.contains("aformat=channel_layouts=mono,aresample=22050"));
+        assert!(chain.contains("highshelf=f=1500:g=-3.0"));
+        assert!(chain.contains("highpass=f=200,lowpass=f=4500"));
+        assert!(chain.contains("volume=2.20,asoftclip=type=tanh:threshold=0.95:output=0.90"));
+        assert!(chain.contains("anoisesrc=d=2.000:c=white:r=22050:a=0.0150"));
+        assert!(chain.contains("aevalsrc='if(lt(random(0),0.000041),0.6000*(2*random(1)-1),0)'"));
+        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]"));
+        assert!(chain.contains("[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(chain.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[out]"));
     }
 
     #[test]
-    fn radio_filter_chain_adds_sparse_crackle_layer_on_sw() {
+    fn radio_filter_chain_uses_make_radio_sound_sw_style() {
         let mut filters = Vec::new();
         push_radio_effect_filters(
             &mut filters,
@@ -1085,11 +1110,16 @@ mod tests {
         );
         let chain = filters.join(";");
 
-        assert!(chain.contains("anoisesrc=d=2.000:c=pink:r=44100:a=0.0470[noise]"));
-        assert!(chain.contains("aevalsrc='if(lt(random(0),0.001200),0.1600*(2*random(1)-1),0)'"));
-        assert!(chain.contains("highpass=f=1800[crackle]"));
-        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first[out_mix]"));
-        assert!(chain.contains("[out_mix]aformat=channel_layouts=mono[out]"));
+        assert!(chain.contains("aformat=channel_layouts=mono,aresample=22050"));
+        assert!(chain.contains("highshelf=f=1500:g=-5.0"));
+        assert!(chain.contains("highpass=f=350,lowpass=f=2800"));
+        assert!(chain.contains("volume=3.00,asoftclip=type=tanh:threshold=0.95:output=0.90"));
+        assert!(chain.contains("volume='1-0.315*(0.5-0.5*(0.7*sin(2*PI*0.17*t)+0.3*sin(2*PI*0.73*t)))':eval=frame[eq]"));
+        assert!(chain.contains("anoisesrc=d=2.000:c=white:r=22050:a=0.0350"));
+        assert!(chain.contains("aevalsrc='if(lt(random(0),0.000159),0.8200*(2*random(1)-1),0)'"));
+        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first:normalize=0[out_mix]"));
+        assert!(chain.contains("[out_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(chain.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[out]"));
     }
 
     #[test]
@@ -1136,8 +1166,9 @@ mod tests {
             .find_map(|pair| (pair[0] == "-filter_complex").then(|| pair[1].clone()))
             .expect("filter_complex arg should be present");
 
-        assert!(filter_complex.contains("[dub0_mix]aformat=channel_layouts=mono[dub0]"));
-        assert!(filter_complex.contains("[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0[aout_mix]"));
+        assert!(filter_complex.contains("[dub0_mix]acompressor=threshold=0.5:ratio=3.0:attack=5:release=80:makeup=1.26"));
+        assert!(filter_complex.contains("alimiter=limit=0.95,aformat=channel_layouts=mono[dub0]"));
+        assert!(filter_complex.contains("[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout_mix]"));
         assert!(filter_complex.contains("[aout_mix]aformat=channel_layouts=mono[aout]"));
         assert!(args.windows(2).any(|pair| pair[0] == "-ac" && pair[1] == "1"));
     }
