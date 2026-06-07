@@ -565,15 +565,70 @@ fn escape_path_for_filter(path: &std::path::Path) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RadioParams {
+    low_cut: f64,
+    high_cut: f64,
+    noise_amp: f64,
+    ratio: f64,
+    crackle_amp: f64,
+    crackle_chance: f64,
+}
+
 /// Radio effect parameters interpolated by intensity (0–100).
-/// Returns (highpass_freq, lowpass_freq, noise_amplitude, compressor_ratio).
-fn radio_params(intensity: u32) -> (f64, f64, f64, f64) {
+fn radio_params(intensity: u32) -> RadioParams {
     let t = (intensity.min(100) as f64) / 100.0;
-    let low_cut = 200.0 + t * 300.0;
-    let high_cut = 4000.0 - t * 1200.0;
-    let noise_amp = 0.005 + t * 0.030;
-    let ratio = 2.0 + t * 6.0;
-    (low_cut, high_cut, noise_amp, ratio)
+    let sw_weight = t.powf(2.2);
+    RadioParams {
+        low_cut: 200.0 + t * 300.0,
+        high_cut: 4000.0 - t * 1200.0,
+        noise_amp: 0.005 + t * 0.030 + sw_weight * 0.012,
+        ratio: 2.0 + t * 6.0,
+        crackle_amp: sw_weight * 0.16,
+        crackle_chance: sw_weight * 0.0012,
+    }
+}
+
+fn push_radio_effect_filters(
+    filters: &mut Vec<String>,
+    input_chain: &str,
+    duration: f64,
+    intensity: u32,
+    eq_label: &str,
+    noise_label: &str,
+    crackle_label: &str,
+    out_label: &str,
+) {
+    let p = radio_params(intensity);
+    let mix_label = format!("{out_label}_mix");
+    filters.push(format!(
+        "{input_chain}highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
+         acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[{eq_label}]",
+        low_cut = p.low_cut,
+        high_cut = p.high_cut,
+        ratio = p.ratio,
+    ));
+    filters.push(format!(
+        "anoisesrc=d={duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]",
+        noise_amp = p.noise_amp,
+    ));
+
+    if p.crackle_amp > 0.0001 && p.crackle_chance > 0.000001 {
+        filters.push(format!(
+            "aevalsrc='if(lt(random(0),{chance:.6}),{amp:.4}*(2*random(1)-1),0)':s=44100:d={duration:.3},\
+             highpass=f=1800[{crackle_label}]",
+            chance = p.crackle_chance,
+            amp = p.crackle_amp,
+        ));
+        filters.push(format!(
+            "[{eq_label}][{noise_label}][{crackle_label}]amix=inputs=3:duration=first[{mix_label}]"
+        ));
+    } else {
+        filters.push(format!(
+            "[{eq_label}][{noise_label}]amix=inputs=2:duration=first[{mix_label}]"
+        ));
+    }
+    filters.push(format!("[{mix_label}]aformat=channel_layouts=mono[{out_label}]"));
 }
 
 /// Quick probe to check whether the input file has at least one audio stream.
@@ -639,17 +694,20 @@ fn build_export_filter_cmd(
 ) {
     let mut filters: Vec<String> = Vec::new();
     let mut audio_labels: Vec<String> = Vec::new();
+    let has_radio_processing = (original_radio && input_has_audio)
+        || overlapping_audio.iter().any(|audio| audio.radio_effect);
 
     if original_radio && input_has_audio {
-        let (low_cut, high_cut, noise_amp, ratio) = radio_params(original_radio_intensity);
-        filters.push(format!(
-            "[0:a]highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
-             acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[orig_eq]"
-        ));
-        filters.push(format!(
-            "anoisesrc=d={seg_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[orig_noise]"
-        ));
-        filters.push("[orig_eq][orig_noise]amix=inputs=2:duration=first[orig_out]".into());
+        push_radio_effect_filters(
+            &mut filters,
+            "[0:a]",
+            seg_duration,
+            original_radio_intensity,
+            "orig_eq",
+            "orig_noise",
+            "orig_crackle",
+            "orig_out",
+        );
         audio_labels.push("[orig_out]".into());
     } else if input_has_audio {
         audio_labels.push("[0:a]".into());
@@ -667,20 +725,20 @@ fn build_export_filter_cmd(
         );
 
         if audio.radio_effect {
-            let (low_cut, high_cut, noise_amp, ratio) = radio_params(audio.radio_intensity);
             let eq_label = format!("dub{j}_eq");
-            filters.push(format!(
-                "{base},highpass=f={low_cut:.0},lowpass=f={high_cut:.0},\
-                 acompressor=threshold=0.1:ratio={ratio:.1}:attack=5:release=50[{eq_label}]"
-            ));
             let noise_label = format!("dub{j}_n");
-            filters.push(format!(
-                "anoisesrc=d={effective_duration:.3}:c=pink:r=44100:a={noise_amp:.4}[{noise_label}]"
-            ));
+            let crackle_label = format!("dub{j}_c");
             let out_label = format!("dub{j}");
-            filters.push(format!(
-                "[{eq_label}][{noise_label}]amix=inputs=2:duration=first[{out_label}]"
-            ));
+            push_radio_effect_filters(
+                &mut filters,
+                &format!("{base},"),
+                effective_duration,
+                audio.radio_intensity,
+                &eq_label,
+                &noise_label,
+                &crackle_label,
+                &out_label,
+            );
             audio_labels.push(format!("[{out_label}]"));
         } else {
             let out_label = format!("dub{j}");
@@ -692,9 +750,16 @@ fn build_export_filter_cmd(
     if audio_labels.len() > 1 {
         let mix_in: String = audio_labels.join("");
         let n = audio_labels.len();
-        filters.push(format!(
-            "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout]"
-        ));
+        if has_radio_processing {
+            filters.push(format!(
+                "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout_mix]"
+            ));
+            filters.push("[aout_mix]aformat=channel_layouts=mono[aout]".into());
+        } else {
+            filters.push(format!(
+                "{mix_in}amix=inputs={n}:duration=first:dropout_transition=0[aout]"
+            ));
+        }
     } else if audio_labels.len() == 1 && audio_labels[0] != "[0:a]" {
         let last = filters.last_mut().unwrap();
         let label = audio_labels[0].trim_matches(|c| c == '[' || c == ']');
@@ -752,7 +817,11 @@ fn build_export_filter_cmd(
     } else {
         cmd.args(["-c:v", "copy"]);
     }
-    cmd.args(["-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero"]);
+    cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+    if has_radio_processing {
+        cmd.args(["-ac", "1"]);
+    }
+    cmd.args(["-avoid_negative_ts", "make_zero"]);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -935,7 +1004,11 @@ fn build_vhs_filter_chain(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_vhs_filter_chain, parse_vhs_color_profile, vhs_params, VhsColorProfile};
+    use super::{
+        build_export_filter_cmd, build_vhs_filter_chain, parse_vhs_color_profile,
+        push_radio_effect_filters, radio_params, vhs_params, AudioTrack, VhsColorProfile,
+    };
+    use std::process::Command;
 
     #[test]
     fn vhs_params_clamp_intensity_to_100() {
@@ -955,6 +1028,118 @@ mod tests {
         assert!(damaged.scanline_alpha > light.scanline_alpha);
         assert!(damaged.tracking_height > light.tracking_height);
         assert!(damaged.saturation < light.saturation);
+    }
+
+    #[test]
+    fn radio_params_make_sw_noisier_and_cracklier_than_am() {
+        let am = radio_params(0);
+        let sw = radio_params(100);
+
+        assert_eq!(am.low_cut, 200.0);
+        assert_eq!(am.high_cut, 4000.0);
+        assert_eq!(am.noise_amp, 0.005);
+        assert_eq!(am.crackle_amp, 0.0);
+        assert_eq!(am.crackle_chance, 0.0);
+
+        assert_eq!(sw.low_cut, 500.0);
+        assert_eq!(sw.high_cut, 2800.0);
+        assert!(sw.noise_amp > 0.045);
+        assert!(sw.crackle_amp > 0.15);
+        assert!(sw.crackle_chance > 0.001);
+        assert!(sw.ratio > am.ratio);
+    }
+
+    #[test]
+    fn radio_filter_chain_keeps_am_without_crackle_layer() {
+        let mut filters = Vec::new();
+        push_radio_effect_filters(
+            &mut filters,
+            "[0:a]",
+            2.0,
+            0,
+            "eq",
+            "noise",
+            "crackle",
+            "out",
+        );
+        let chain = filters.join(";");
+
+        assert!(chain.contains("anoisesrc=d=2.000:c=pink:r=44100:a=0.0050[noise]"));
+        assert!(!chain.contains("aevalsrc="));
+        assert!(chain.contains("[eq][noise]amix=inputs=2:duration=first[out_mix]"));
+        assert!(chain.contains("[out_mix]aformat=channel_layouts=mono[out]"));
+    }
+
+    #[test]
+    fn radio_filter_chain_adds_sparse_crackle_layer_on_sw() {
+        let mut filters = Vec::new();
+        push_radio_effect_filters(
+            &mut filters,
+            "[0:a]",
+            2.0,
+            100,
+            "eq",
+            "noise",
+            "crackle",
+            "out",
+        );
+        let chain = filters.join(";");
+
+        assert!(chain.contains("anoisesrc=d=2.000:c=pink:r=44100:a=0.0470[noise]"));
+        assert!(chain.contains("aevalsrc='if(lt(random(0),0.001200),0.1600*(2*random(1)-1),0)'"));
+        assert!(chain.contains("highpass=f=1800[crackle]"));
+        assert!(chain.contains("[eq][noise][crackle]amix=inputs=3:duration=first[out_mix]"));
+        assert!(chain.contains("[out_mix]aformat=channel_layouts=mono[out]"));
+    }
+
+    #[test]
+    fn final_audio_mix_for_radio_exports_is_forced_to_mono() {
+        let audio = AudioTrack {
+            id: "dub-1".into(),
+            segment_id: "seg-1".into(),
+            segment_start: 0.0,
+            segment_end: 2.0,
+            file_path: "dub.wav".into(),
+            audio_source_start: 0.0,
+            audio_source_end: 2.0,
+            volume: 1.0,
+            radio_effect: true,
+            radio_intensity: 100,
+        };
+        let overlapping_audio = vec![&audio];
+        let mut cmd = Command::new("ffmpeg");
+
+        build_export_filter_cmd(
+            &mut cmd,
+            &overlapping_audio,
+            false,
+            0,
+            0.0,
+            2.0,
+            None,
+            false,
+            23,
+            false,
+            true,
+            false,
+            40,
+            true,
+            "faded",
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let filter_complex = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then(|| pair[1].clone()))
+            .expect("filter_complex arg should be present");
+
+        assert!(filter_complex.contains("[dub0_mix]aformat=channel_layouts=mono[dub0]"));
+        assert!(filter_complex.contains("[0:a][dub0]amix=inputs=2:duration=first:dropout_transition=0[aout_mix]"));
+        assert!(filter_complex.contains("[aout_mix]aformat=channel_layouts=mono[aout]"));
+        assert!(args.windows(2).any(|pair| pair[0] == "-ac" && pair[1] == "1"));
     }
 
     #[test]
